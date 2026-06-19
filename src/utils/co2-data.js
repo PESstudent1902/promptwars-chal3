@@ -81,6 +81,14 @@ export const CO2_DB = Object.freeze({
 
 // ── Keyword → DB key mapping ─────────────────────────────────────────────────
 
+/** Deviation multiplier limit for Gemini CO2 output */
+const CO2_DEVIATION_FACTOR = 5;
+
+/**
+ * Array of [Regex, DB Key] tuples used to map a free-text product name to a known category.
+ * Evaluated in order, so specific matches must appear before generic matches.
+ * @type {Array<[RegExp, string]>}
+ */
 const KEYWORD_MAP = [
   // Specific laptop/phone first to avoid generic shadowing
   [/\b(refurbished|renewed).*(laptop|macbook|computer)\b/i,             "refurbished laptop"],
@@ -124,8 +132,8 @@ const KEYWORD_MAP = [
   [/\b(plastic bottle|water bottle.*plastic)\b/i,                      "plastic bottle"],
   [/\b(steel bottle|stainless.*bottle|insulated bottle)\b/i,           "steel bottle"],
   [/\b(plastic bag|polythene bag|garbage bag)\b/i,                     "plastic bags"],
-  [/\b(sofa|mattress|wardrobe|furniture)\b/i,                          "furniture"],
   [/\b(mattress)\b/i,                                                  "mattress"],
+  [/\b(sofa|wardrobe|furniture)\b/i,                                   "furniture"],
 
   // Specific toys first
   [/\b(wooden toy|eco toy|wood.*toy)\b/i,                              "wooden toy"],
@@ -147,7 +155,8 @@ const KEYWORD_MAP = [
  * @returns {{ co2_kg: number, severity: string, unit: string, key: string } | null}
  */
 export function lookupCO2(productName) {
-  const name = (productName || "").toLowerCase();
+  if (typeof productName !== "string") return null;
+  const name = productName.toLowerCase();
   for (const [regex, key] of KEYWORD_MAP) {
     if (regex.test(name)) {
       const entry = CO2_DB[key];
@@ -166,16 +175,21 @@ export function lookupCO2(productName) {
  * @returns {{ co2_kg: number, clamped: boolean }}
  */
 export function validateCO2(geminiCo2, productName) {
+  const parsedCo2 = Number(geminiCo2);
+  if (isNaN(parsedCo2) || typeof productName !== "string") {
+    return { co2_kg: isNaN(parsedCo2) ? 0 : parsedCo2, clamped: false };
+  }
+
   const ref = lookupCO2(productName);
-  if (!ref) return { co2_kg: geminiCo2, clamped: false };
+  if (!ref) return { co2_kg: parsedCo2, clamped: false };
 
-  const lo = ref.co2_kg / 5;
-  const hi = ref.co2_kg * 5;
+  const lo = ref.co2_kg / CO2_DEVIATION_FACTOR;
+  const hi = ref.co2_kg * CO2_DEVIATION_FACTOR;
 
-  if (geminiCo2 < lo || geminiCo2 > hi) {
+  if (parsedCo2 < lo || parsedCo2 > hi) {
     return { co2_kg: ref.co2_kg, clamped: true };
   }
-  return { co2_kg: geminiCo2, clamped: false };
+  return { co2_kg: parsedCo2, clamped: false };
 }
 
 /** Sustainable product keywords — used for "Great Choice" detection */
@@ -187,5 +201,6 @@ const SUSTAINABLE_KEYWORDS = /\b(jute|coir|bamboo|organic|reclaimed|refurbished|
  * @returns {boolean}
  */
 export function isSustainableProduct(productName) {
-  return SUSTAINABLE_KEYWORDS.test(productName || "");
+  if (typeof productName !== "string") return false;
+  return SUSTAINABLE_KEYWORDS.test(productName);
 }

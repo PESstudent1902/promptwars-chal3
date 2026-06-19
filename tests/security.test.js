@@ -148,6 +148,12 @@ describe("Security Hardening & Input Validation", () => {
       expect(parsed.co2_kg).toBe(0);
     });
 
+    test("clamps credit_delta to -60 for excessive negative values", () => {
+      const largeNeg = validJson.replace('"credit_delta": 10', '"credit_delta": -120');
+      const parsed = parseGeminiResponse(largeNeg);
+      expect(parsed.credit_delta).toBe(-60);
+    });
+
     test("throws error if required fields are missing", () => {
       const missingField = validJson.replace('"analogy": "ceiling fan",', '');
       expect(() => parseGeminiResponse(missingField)).toThrow();

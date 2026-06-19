@@ -34,14 +34,39 @@ const FETCH_TIMEOUT_MS = 15_000;
 /** Valid severity values */
 const VALID_SEVERITIES = Object.freeze(new Set(["low", "medium", "high", "critical"]));
 
+/** Maximum output tokens for Gemini API */
+const MAX_OUTPUT_TOKENS = 1024;
+
+/** Retry delay for 429 status codes in milliseconds */
+const RETRY_DELAY_MS = 6000;
+
+/** Maximum length for cache keys */
+const MAX_CACHE_KEY_LENGTH = 120;
+
+/** Required fields in Gemini response */
+const REQUIRED_FIELDS = Object.freeze([
+  "co2_kg", "severity", "analogy", "credit_delta",
+  "current_pros", "current_cons", "alternative_name", "alternative_co2_kg",
+  "alternative_pros", "alternative_cons", "saving_kg", "saving_message",
+]);
+
 // ─── Storage helpers ──────────────────────────────────────────────────────────
 
+/**
+ * Gets API key from storage
+ * @returns {Promise<string|null>}
+ */
 async function getApiKey() {
   return new Promise((resolve) => {
     chrome.storage.local.get(["gemini_api_key"], (r) => resolve(r.gemini_api_key || null));
   });
 }
 
+/**
+ * Gets cached data if valid
+ * @param {string} key Cache key
+ * @returns {Promise<Object|null>}
+ */
 async function getCached(key) {
   return new Promise((resolve) => {
     chrome.storage.local.get([`ec_${key}`], (r) => {
@@ -52,12 +77,23 @@ async function getCached(key) {
   });
 }
 
+/**
+ * Sets cache data
+ * @param {string} key Cache key
+ * @param {Object} data Data to cache
+ * @returns {Promise<void>}
+ */
 async function setCache(key, data) {
   chrome.storage.local.set({ [`ec_${key}`]: { data, ts: Date.now() } });
 }
 
 // ─── Sanitize & Validate ──────────────────────────────────────────────────────
 
+/**
+ * Sanitizes input string
+ * @param {string} str Input string
+ * @returns {string} Sanitized string
+ */
 export function sanitize(str) {
   if (typeof str !== "string") return "";
   return str.replace(/[\x00-\x1F\x7F<>"'`]/g, "").trim().slice(0, 200);
@@ -77,6 +113,15 @@ export function isValidApiKeyFormat(key) {
 
 // ─── Prompt builder ───────────────────────────────────────────────────────────
 
+/**
+ * Builds the prompt for Gemini API
+ * @param {Object} input
+ * @param {string} input.itemName
+ * @param {string} input.category
+ * @param {number} [input.quantity=1]
+ * @param {Object} [input.context={}]
+ * @returns {string}
+ */
 function buildPrompt({ itemName, category, quantity = 1, context = {} }) {
   const item      = sanitize(itemName);
   const cat       = sanitize(category);
@@ -96,27 +141,49 @@ function buildPrompt({ itemName, category, quantity = 1, context = {} }) {
   prompt += `A user in ${city} is about to ${verb} "${item}".\n`;
   prompt += `Product category: ${cat}${subCat ? ` (sub-type: ${subCat})` : ""}. Quantity: ${quantity}.\n\n`;
 
-  // Ground-truth CO2 hint from local DB
+  prompt += buildPromptHints(item, localRef, alreadySustainable, altName, altUrl, altDetails);
+  prompt += buildPromptRules();
+
+  return prompt;
+}
+
+/**
+ * Builds hints and reference data for the prompt
+ * @param {string} item Sanitized item name
+ * @param {Object} localRef Local DB reference data
+ * @param {boolean} alreadySustainable Whether product is already eco-friendly
+ * @param {string} altName Alternative product name
+ * @param {string} altUrl Alternative product URL
+ * @param {string} altDetails Alternative product details
+ * @returns {string} Prompt string section
+ */
+function buildPromptHints(item, localRef, alreadySustainable, altName, altUrl, altDetails) {
+  let hints = "";
   if (localRef) {
-    prompt += `REFERENCE DATA: Verified lifecycle CO2 for this type of product is approximately ${localRef.co2_kg} kg CO2e (${localRef.unit}). Use this as your anchor — do not deviate more than 5x without strong justification.\n\n`;
+    hints += `REFERENCE DATA: Verified lifecycle CO2 for this type of product is approximately ${localRef.co2_kg} kg CO2e (${localRef.unit}). Use this as your anchor — do not deviate more than 5x without strong justification.\n\n`;
   }
 
-  // Sustainable product shortcut
   if (alreadySustainable) {
-    prompt += `NOTE: This product IS ALREADY an eco-friendly/sustainable choice (it uses sustainable materials/processes). `;
-    prompt += `Set "is_sustainable_choice": true. Set "alternative_name" to "" (empty string). `;
-    prompt += `Set "alternative_co2_kg" to 0, "saving_kg" to 0. `;
-    prompt += `Give "credit_delta" a POSITIVE value (reward for good choice). `;
-    prompt += `In "saving_message" celebrate their excellent sustainable choice — do NOT suggest switching.\n\n`;
+    hints += `NOTE: This product IS ALREADY an eco-friendly/sustainable choice (it uses sustainable materials/processes). `;
+    hints += `Set "is_sustainable_choice": true. Set "alternative_name" to "" (empty string). `;
+    hints += `Set "alternative_co2_kg" to 0, "saving_kg" to 0. `;
+    hints += `Give "credit_delta" a POSITIVE value (reward for good choice). `;
+    hints += `In "saving_message" celebrate their excellent sustainable choice — do NOT suggest switching.\n\n`;
   }
 
-  // Alternative product hint from same store
   if (altName) {
-    prompt += `We found a specific greener alternative on the same store: "${altName}" (URL: ${altUrl}). Details: ${altDetails}.\n`;
-    prompt += `Compare these two exact products. The alternative_name MUST be "${altName}".\n\n`;
+    hints += `We found a specific greener alternative on the same store: "${altName}" (URL: ${altUrl}). Details: ${altDetails}.\n`;
+    hints += `Compare these two exact products. The alternative_name MUST be "${altName}".\n\n`;
   }
+  return hints;
+}
 
-  prompt += `CRITICAL RULES:
+/**
+ * Builds rules and output format instructions for the prompt
+ * @returns {string} Prompt string section
+ */
+function buildPromptRules() {
+  return `CRITICAL RULES:
 1. The alternative product MUST serve the SAME PURPOSE and be the SAME TYPE of product as the original. Do NOT suggest a lifestyle change (e.g., "cook at home") as an alternative to a physical product. Do NOT suggest a completely different category.
    - If original is a laptop → alternative must be a laptop (e.g., refurbished version)
    - If original is a t-shirt → alternative must be a t-shirt (e.g., organic cotton)
@@ -143,8 +210,6 @@ Return ONLY a JSON object with this exact structure — no markdown, no prose, j
 }
 
 CO2 reference: beef/lamb 20-27 kg/kg, chicken 6 kg/kg, paneer 3 kg/kg, dal 0.9 kg/kg, petrol cab 0.17 kg/km, EV cab 0.05 kg/km, metro 0.03 kg/km, flight 0.15 kg/km, smartphone ~70-90 kg, laptop ~300-400 kg, organic cotton tshirt 2.5 kg, polyester tshirt 10 kg, new laptop 350 kg vs refurbished 70 kg. Return ONLY the JSON object.`;
-
-  return prompt;
 }
 
 // ─── Static fallback ──────────────────────────────────────────────────────────
@@ -152,97 +217,121 @@ CO2 reference: beef/lamb 20-27 kg/kg, chicken 6 kg/kg, paneer 3 kg/kg, dal 0.9 k
 /**
  * Deterministic offline fallback. Uses the CO2 local DB where possible,
  * then falls back to curated static entries.
+ * @param {string} itemName Item name
+ * @param {string} category Category name
+ * @returns {Object} Fallback result
  */
 function staticFallback(itemName, category) {
   const item = (itemName || "").toLowerCase();
 
-  // ── Food ──────────────────────────────────────────────────────────────────
-  if (category === "food") {
-    if (/chicken|mutton|beef|lamb|prawn|fish/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 6.0, severity: "high", analogy: "Ordering this every week for a year produces as much CO₂ as driving ~3,000 km.", credit_delta: -18, current_pros: ["High protein", "Tastes great"], current_cons: ["~6 kg CO₂ per serving", "High water usage"], alternative_name: "Paneer Tikka or Dal Makhani", alternative_co2_kg: 1.2, alternative_pros: ["80% less carbon", "More affordable"], alternative_cons: ["Different taste profile"], saving_kg: 4.8, saving_message: "Switching to paneer saves 4.8 kg CO₂ — like skipping a 28 km car ride!" };
-    }
-    return { is_sustainable_choice: false, co2_kg: 1.5, severity: "low", analogy: "This meal has a modest carbon footprint — about the same as a 9 km auto ride.", credit_delta: -5, current_pros: ["Reasonable carbon footprint", "Satisfying meal"], current_cons: ["Packaging adds ~0.3 kg CO₂", "Delivery vehicle emissions"], alternative_name: "Home-cooked version of the same meal", alternative_co2_kg: 0.3, alternative_pros: ["5× less carbon", "Healthier, cheaper"], alternative_cons: ["Takes more time to prepare"], saving_kg: 1.2, saving_message: "Cooking at home saves 1.2 kg CO₂ and money!" };
-  }
+  if (category === "food") return foodFallback(item);
+  if (category === "cab") return cabFallback(item);
+  if (category === "travel") return travelFallback(item);
+  if (category === "ecommerce") return ecommerceFallback(item);
 
-  // ── Cab ───────────────────────────────────────────────────────────────────
-  if (category === "cab") {
-    if (/shared|share|pool/.test(item)) {
-      return { is_sustainable_choice: true, co2_kg: 0.5, severity: "low", analogy: "Shared ride is one of the greenest cab options — only 0.5 kg CO₂.", credit_delta: 15, current_pros: ["Shares emissions", "Affordable"], current_cons: ["Slightly longer journey"], alternative_name: "", alternative_co2_kg: 0, alternative_pros: [], alternative_cons: [], saving_kg: 0, saving_message: "Great choice! Shared rides are already much greener than solo cabs." };
-    }
-    return { is_sustainable_choice: false, co2_kg: 1.7, severity: "medium", analogy: "This solo cab ride produces as much CO₂ as charging your phone 200 times.", credit_delta: -12, current_pros: ["Door-to-door convenience", "Air conditioned"], current_cons: ["~1.7 kg CO₂", "Adds to traffic"], alternative_name: "Ola Share or Metro", alternative_co2_kg: 0.3, alternative_pros: ["Saves 1.4 kg CO₂", "Often faster in traffic"], alternative_cons: ["Less private"], saving_kg: 1.4, saving_message: "Switching to shared saves 1.4 kg CO₂ — equivalent to planting a sapling!" };
-  }
+  return smartGenericFallback(item);
+}
 
-  // ── Travel ────────────────────────────────────────────────────────────────
-  if (category === "travel") {
-    return { is_sustainable_choice: false, co2_kg: 150, severity: "critical", analogy: "This flight produces more CO₂ than an average Indian emits in an entire month.", credit_delta: -60, current_pros: ["Fast — saves hours", "Comfortable"], current_cons: ["~150 kg CO₂ per passenger", "10× more than train"], alternative_name: "Rajdhani / Shatabdi Train", alternative_co2_kg: 15, alternative_pros: ["90% less carbon", "Scenic, comfortable", "City-centre to city-centre"], alternative_cons: ["Takes longer (but you can sleep/work)"], saving_kg: 135, saving_message: "Taking the train saves 135 kg CO₂ — your single biggest climate action!" };
+/**
+ * Static fallback for food category
+ * @param {string} item Item name
+ * @returns {Object}
+ */
+function foodFallback(item) {
+  if (/chicken|mutton|beef|lamb|prawn|fish/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 6.0, severity: "high", analogy: "Ordering this every week for a year produces as much CO₂ as driving ~3,000 km.", credit_delta: -18, current_pros: ["High protein", "Tastes great"], current_cons: ["~6 kg CO₂ per serving", "High water usage"], alternative_name: "Paneer Tikka or Dal Makhani", alternative_co2_kg: 1.2, alternative_pros: ["80% less carbon", "More affordable"], alternative_cons: ["Different taste profile"], saving_kg: 4.8, saving_message: "Switching to paneer saves 4.8 kg CO₂ — like skipping a 28 km car ride!" };
   }
+  return { is_sustainable_choice: false, co2_kg: 1.5, severity: "low", analogy: "This meal has a modest carbon footprint — about the same as a 9 km auto ride.", credit_delta: -5, current_pros: ["Reasonable carbon footprint", "Satisfying meal"], current_cons: ["Packaging adds ~0.3 kg CO₂", "Delivery vehicle emissions"], alternative_name: "Home-cooked version of the same meal", alternative_co2_kg: 0.3, alternative_pros: ["5× less carbon", "Healthier, cheaper"], alternative_cons: ["Takes more time to prepare"], saving_kg: 1.2, saving_message: "Cooking at home saves 1.2 kg CO₂ and money!" };
+}
 
-  // ── Ecommerce — sustainable detected ──────────────────────────────────────
-  if (category === "ecommerce" && isSustainableProduct(item)) {
+/**
+ * Static fallback for cab category
+ * @param {string} item Item name
+ * @returns {Object}
+ */
+function cabFallback(item) {
+  if (/shared|share|pool/.test(item)) {
+    return { is_sustainable_choice: true, co2_kg: 0.5, severity: "low", analogy: "Shared ride is one of the greenest cab options — only 0.5 kg CO₂.", credit_delta: 15, current_pros: ["Shares emissions", "Affordable"], current_cons: ["Slightly longer journey"], alternative_name: "", alternative_co2_kg: 0, alternative_pros: [], alternative_cons: [], saving_kg: 0, saving_message: "Great choice! Shared rides are already much greener than solo cabs." };
+  }
+  return { is_sustainable_choice: false, co2_kg: 1.7, severity: "medium", analogy: "This solo cab ride produces as much CO₂ as charging your phone 200 times.", credit_delta: -12, current_pros: ["Door-to-door convenience", "Air conditioned"], current_cons: ["~1.7 kg CO₂", "Adds to traffic"], alternative_name: "Ola Share or Metro", alternative_co2_kg: 0.3, alternative_pros: ["Saves 1.4 kg CO₂", "Often faster in traffic"], alternative_cons: ["Less private"], saving_kg: 1.4, saving_message: "Switching to shared saves 1.4 kg CO₂ — equivalent to planting a sapling!" };
+}
+
+/**
+ * Static fallback for travel category
+ * @param {string} item Item name
+ * @returns {Object}
+ */
+function travelFallback(item) {
+  return { is_sustainable_choice: false, co2_kg: 150, severity: "critical", analogy: "This flight produces more CO₂ than an average Indian emits in an entire month.", credit_delta: -60, current_pros: ["Fast — saves hours", "Comfortable"], current_cons: ["~150 kg CO₂ per passenger", "10× more than train"], alternative_name: "Rajdhani / Shatabdi Train", alternative_co2_kg: 15, alternative_pros: ["90% less carbon", "Scenic, comfortable", "City-centre to city-centre"], alternative_cons: ["Takes longer (but you can sleep/work)"], saving_kg: 135, saving_message: "Taking the train saves 135 kg CO₂ — your single biggest climate action!" };
+}
+
+/**
+ * Static fallback for ecommerce category
+ * @param {string} item Item name
+ * @returns {Object}
+ */
+function ecommerceFallback(item) {
+  if (isSustainableProduct(item)) {
     return { is_sustainable_choice: true, co2_kg: 1.5, severity: "low", analogy: "This product is made from sustainable materials with a minimal carbon footprint.", credit_delta: 15, current_pros: ["Eco-friendly sustainable material", "Low manufacturing emissions"], current_cons: ["May cost slightly more"], alternative_name: "", alternative_co2_kg: 0, alternative_pros: [], alternative_cons: [], saving_kg: 0, saving_message: "Awesome! You're already buying the eco-friendly option. 🏆" };
   }
-
-  // ── Ecommerce — specific product types ────────────────────────────────────
-  if (category === "ecommerce") {
-    if (/\b(laptop|macbook|computer)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 350, severity: "critical", analogy: "Manufacturing this laptop emits more CO₂ than driving 1,800 km in a petrol car.", credit_delta: -45, current_pros: ["Brand new warranty", "Maximum battery capacity"], current_cons: ["High manufacturing footprint", "Depletes rare metals"], alternative_name: "Refurbished MacBook Air M1", alternative_co2_kg: 70, alternative_pros: ["80% lower manufacturing emissions", "Includes warranty"], alternative_cons: ["May have minor cosmetic wear"], saving_kg: 280, saving_message: "Choosing refurbished saves 280 kg CO₂ — like planting 12 trees!" };
-    }
-    if (/\b(phone|smartphone|iphone|android)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 80, severity: "high", analogy: "Manufacturing this smartphone uses more carbon than a refrigerator running for a full year.", credit_delta: -30, current_pros: ["Latest features", "Flawless battery"], current_cons: ["Massive mining impact", "Contributes to e-waste"], alternative_name: "Refurbished iPhone 13 (128GB)", alternative_co2_kg: 16, alternative_pros: ["Saves 64 kg CO₂", "Tested like-new, lower cost"], alternative_cons: ["Battery health ~85%"], saving_kg: 64, saving_message: "Choosing refurbished saves 64 kg CO₂ — a massive climate win!" };
-    }
-    if (/\b(shoes?|sneakers?|footwear|sandals?|boots?)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 12, severity: "medium", analogy: "Producing synthetic sneakers releases carbon equivalent to burning 5 litres of petrol.", credit_delta: -15, current_pros: ["Brand popularity", "Standard synthetic build"], current_cons: ["Oil-based plastics", "Non-biodegradable"], alternative_name: "Neemans ReLive Sneakers (recycled plastic)", alternative_co2_kg: 4.2, alternative_pros: ["Made from recycled bottles", "Washable & comfortable"], alternative_cons: ["Requires gentle care"], saving_kg: 7.8, saving_message: "Neemans recycled sneakers save 7.8 kg CO₂!" };
-    }
-    if (/\b(t-shirt|tshirt|shirt|kurta|dress|clothing|wear|apparel)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 9, severity: "medium", analogy: "Making this synthetic garment uses as much water as a person drinks in 3 years.", credit_delta: -12, current_pros: ["Low initial price", "Stretchy fit"], current_cons: ["Fossil-fuel derived polyester", "Microplastics in every wash"], alternative_name: "No Nasties Organic Cotton T-Shirt", alternative_co2_kg: 3, alternative_pros: ["100% certified organic", "Fair trade, carbon neutral"], alternative_cons: ["Wash in cold water to avoid shrinking"], saving_kg: 6, saving_message: "No Nasties organic shirt saves 6 kg CO₂ and stops microplastic pollution!" };
-    }
-    if (/\b(bottle|flask|tumbler)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 1.5, severity: "low", analogy: "A plastic bottle takes 450 years to decompose — outlasting civilizations.", credit_delta: -5, current_pros: ["Lightweight", "Very cheap"], current_cons: ["Leaches microplastics", "Contributes to ocean pollution"], alternative_name: "Milton Thermosteel Insulated Bottle", alternative_co2_kg: 0.4, alternative_pros: ["Food-grade 18/8 stainless steel", "Hot/cold 24 hours"], alternative_cons: ["Slightly heavier to carry"], saving_kg: 1.1, saving_message: "Milton steel bottle saves 1.1 kg CO₂ and eliminates plastic waste!" };
-    }
-    if (/\b(mat|rug|doormat|carpet)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 8, severity: "medium", analogy: "This synthetic mat releases microplastics every time it rains, polluting groundwater.", credit_delta: -10, current_pros: ["Low price", "Easy to wash"], current_cons: ["Synthetic polyester", "Microplastics, non-biodegradable"], alternative_name: "Onlymat Natural Jute Door Mat", alternative_co2_kg: 2.8, alternative_pros: ["100% natural biodegradable jute", "Handwoven, durable"], alternative_cons: ["Dry clean or brush clean only"], saving_kg: 5.2, saving_message: "Onlymat Jute Mat saves 5.2 kg CO₂ and eliminates plastic footprint!" };
-    }
-    if (/\b(bag|backpack|garbage|trash bin)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 2, severity: "medium", analogy: "These plastic bags stay in our ecosystem for 400+ years, harming wildlife.", credit_delta: -8, current_pros: ["Extremely cheap", "Waterproof"], current_cons: ["Virgin petroleum plastic", "Harmful chemical leaching"], alternative_name: "Beco Compostable Garbage Bags (corn starch)", alternative_co2_kg: 0.5, alternative_pros: ["Decomposes in 180 days", "Zero microplastics"], alternative_cons: ["Not for sharp objects or hot liquids"], saving_kg: 1.5, saving_message: "Beco compostable bags save 1.5 kg CO₂ and leave zero microplastics!" };
-    }
-    if (/\b(furniture|sofa|mattress|wardrobe|table|chair|desk|bed)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 60, severity: "high", analogy: "Manufacturing this furniture emits carbon equivalent to driving 300 km in a petrol car.", credit_delta: -22, current_pros: ["Sturdy construction", "Convenient size"], current_cons: ["Virgin wood or high-footprint metal", "Heavy shipping emissions"], alternative_name: "Reclaimed Wood Furniture (same type)", alternative_co2_kg: 18, alternative_pros: ["100% recycled/reclaimed wood", "Saves forest timber"], alternative_cons: ["Natural texture variations"], saving_kg: 42, saving_message: "Choosing reclaimed wood saves 42 kg CO₂ and protects forests!" };
-    }
-    if (/\b(detergent|dishwash|shampoo|bodywash|handwash|cleaner|soap)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 2.5, severity: "medium", analogy: "Chemical detergents contain phosphates that cause toxic algal blooms in Indian lakes.", credit_delta: -10, current_pros: ["Strong synthetic foam", "Scented fragrances"], current_cons: ["Synthetic toxins", "Plastic container waste"], alternative_name: "Beco Natural Plant-Based Dishwash Liquid", alternative_co2_kg: 0.8, alternative_pros: ["Plant-based, baby-safe", "Coconut extract base"], alternative_cons: ["Slightly less lather than synthetic"], saving_kg: 1.7, saving_message: "Beco natural dishwash saves 1.7 kg CO₂ and keeps lakes clean!" };
-    }
-    if (/\b(toy|doll|puzzle|game)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 6, severity: "medium", analogy: "Plastic toys take centuries to degrade — they will outlast your grandchildren.", credit_delta: -10, current_pros: ["Colorful and cheap", "Waterproof"], current_cons: ["Toxic plastics", "Non-recyclable"], alternative_name: "Shumee Wooden Eco Toy (same play type)", alternative_co2_kg: 1.2, alternative_pros: ["Natural wood", "Non-toxic child-safe paints"], alternative_cons: ["Heavier than plastic"], saving_kg: 4.8, saving_message: "Shumee wooden toys save 4.8 kg CO₂ and are completely safe!" };
-    }
-    if (/\b(pot|planter|garden|plant|seeds)\b/.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 5, severity: "medium", analogy: "Plastic plant pots are made from oil — every pot is a tiny fossil fuel investment.", credit_delta: -8, current_pros: ["Lightweight", "Very cheap"], current_cons: ["Virgin petroleum plastic", "Non-biodegradable"], alternative_name: "Beco Biodegradable Coir Pots", alternative_co2_kg: 1, alternative_pros: ["100% organic coconut coir", "Biodegradable, enriches soil"], alternative_cons: ["Fragile over multiple seasons"], saving_kg: 4, saving_message: "Beco coir pots save 4.0 kg CO₂ and eliminate plastic waste!" };
-    }
-    // ── LED / lighting — already the greenest choice ────────────────────────
-    if (/\b(led|cfl|energy.sav|night.?lamp|bulb|tube.?light|downlight|spotlight|strip.?light|fairy.?light|desk.?lamp|floor.?lamp|table.?lamp|reading.?lamp|smart.?light|tubelight)\b/i.test(item)) {
-      return { is_sustainable_choice: true, co2_kg: 2.0, severity: "low", analogy: "An LED bulb uses 80% less electricity than an incandescent — one of the easiest wins for the planet.", credit_delta: 10, current_pros: ["LED is already the most energy-efficient lighting tech", "Lasts 15,000–25,000 hours"], current_cons: ["Contains small amounts of electronics that need responsible disposal"], alternative_name: "", alternative_co2_kg: 0, alternative_pros: [], alternative_cons: [], saving_kg: 0, saving_message: "Great choice! LED lighting is already the eco-friendly standard. 🏆" };
-    }
-    // ── Small appliances ────────────────────────────────────────────────────
-    if (/\b(fan|ceiling.fan|table.fan|pedestal.fan|exhaust.fan)\b/i.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 18, severity: "medium", analogy: "Manufacturing this fan emits as much CO₂ as running it on electricity for 2 years.", credit_delta: -12, current_pros: ["Affordable cooling", "Low running cost"], current_cons: ["Non-recyclable plastic parts", "Manufacturing emissions"], alternative_name: "BLDC Ceiling Fan (same brand/size)", alternative_co2_kg: 18, alternative_pros: ["Uses 65% less electricity than standard fans", "Saves ~1,200 kWh over lifetime"], alternative_cons: ["Higher upfront cost"], saving_kg: 12, saving_message: "A BLDC fan saves electricity equivalent to 12 kg CO₂ over its lifetime!" };
-    }
-    if (/\b(charger|cable|usb|power.bank|adapter|extension.cord|power.strip)\b/i.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 3, severity: "low", analogy: "Electronics accessories have a small but real footprint from plastic and copper mining.", credit_delta: -5, current_pros: ["Essential accessory", "Widely compatible"], current_cons: ["Short product lifespan", "Hard to recycle mixed materials"], alternative_name: "GaN Fast Charger (same wattage, smaller, lasts longer)", alternative_co2_kg: 2, alternative_pros: ["50% smaller, lasts 2× longer", "GaN tech runs cooler — less heat damage"], alternative_cons: ["Slightly higher price"], saving_kg: 1, saving_message: "A quality GaN charger lasts longer and saves 1 kg CO₂ over repeated replacements!" };
-    }
-    if (/\b(watch|clock|alarm)\b/i.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 8, severity: "medium", analogy: "Manufacturing this watch uses rare metals mined with significant environmental impact.", credit_delta: -8, current_pros: ["Reliable timekeeping", "Stylish accessory"], current_cons: ["Rare metal mining", "Battery creates e-waste"], alternative_name: "Solar-Powered Watch (same style)", alternative_co2_kg: 3, alternative_pros: ["No battery replacements ever", "Charges from any light source"], alternative_cons: ["Needs occasional light exposure to charge"], saving_kg: 5, saving_message: "A solar watch eliminates battery waste and saves 5 kg CO₂!" };
-    }
-    if (/\b(pen|pencil|notebook|diary|stationery|paper)\b/i.test(item)) {
-      return { is_sustainable_choice: false, co2_kg: 1, severity: "low", analogy: "Paper stationery has a modest footprint, but recycled alternatives cut it by 60%.", credit_delta: -3, current_pros: ["Affordable", "Widely available"], current_cons: ["Virgin wood pulp", "Bleaching uses chemicals"], alternative_name: "Recycled Paper Notebook (same size)", alternative_co2_kg: 0.4, alternative_pros: ["100% recycled paper", "No new trees cut"], alternative_cons: ["Slightly off-white pages"], saving_kg: 0.6, saving_message: "Recycled notebooks save 0.6 kg CO₂ and protect forests!" };
-    }
+  if (/\b(laptop|macbook|computer)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 350, severity: "critical", analogy: "Manufacturing this laptop emits more CO₂ than driving 1,800 km in a petrol car.", credit_delta: -45, current_pros: ["Brand new warranty", "Maximum battery capacity"], current_cons: ["High manufacturing footprint", "Depletes rare metals"], alternative_name: "Refurbished MacBook Air M1", alternative_co2_kg: 70, alternative_pros: ["80% lower manufacturing emissions", "Includes warranty"], alternative_cons: ["May have minor cosmetic wear"], saving_kg: 280, saving_message: "Choosing refurbished saves 280 kg CO₂ — like planting 12 trees!" };
   }
-
-  // ── Smart generic fallback — extracts product noun and gives a specific suggestion ──
+  if (/\b(phone|smartphone|iphone|android)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 80, severity: "high", analogy: "Manufacturing this smartphone uses more carbon than a refrigerator running for a full year.", credit_delta: -30, current_pros: ["Latest features", "Flawless battery"], current_cons: ["Massive mining impact", "Contributes to e-waste"], alternative_name: "Refurbished iPhone 13 (128GB)", alternative_co2_kg: 16, alternative_pros: ["Saves 64 kg CO₂", "Tested like-new, lower cost"], alternative_cons: ["Battery health ~85%"], saving_kg: 64, saving_message: "Choosing refurbished saves 64 kg CO₂ — a massive climate win!" };
+  }
+  if (/\b(shoes?|sneakers?|footwear|sandals?|boots?)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 12, severity: "medium", analogy: "Producing synthetic sneakers releases carbon equivalent to burning 5 litres of petrol.", credit_delta: -15, current_pros: ["Brand popularity", "Standard synthetic build"], current_cons: ["Oil-based plastics", "Non-biodegradable"], alternative_name: "Neemans ReLive Sneakers (recycled plastic)", alternative_co2_kg: 4.2, alternative_pros: ["Made from recycled bottles", "Washable & comfortable"], alternative_cons: ["Requires gentle care"], saving_kg: 7.8, saving_message: "Neemans recycled sneakers save 7.8 kg CO₂!" };
+  }
+  if (/\b(t-shirt|tshirt|shirt|kurta|dress|clothing|wear|apparel)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 9, severity: "medium", analogy: "Making this synthetic garment uses as much water as a person drinks in 3 years.", credit_delta: -12, current_pros: ["Low initial price", "Stretchy fit"], current_cons: ["Fossil-fuel derived polyester", "Microplastics in every wash"], alternative_name: "No Nasties Organic Cotton T-Shirt", alternative_co2_kg: 3, alternative_pros: ["100% certified organic", "Fair trade, carbon neutral"], alternative_cons: ["Wash in cold water to avoid shrinking"], saving_kg: 6, saving_message: "No Nasties organic shirt saves 6 kg CO₂ and stops microplastic pollution!" };
+  }
+  if (/\b(bottle|flask|tumbler)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 1.5, severity: "low", analogy: "A plastic bottle takes 450 years to decompose — outlasting civilizations.", credit_delta: -5, current_pros: ["Lightweight", "Very cheap"], current_cons: ["Leaches microplastics", "Contributes to ocean pollution"], alternative_name: "Milton Thermosteel Insulated Bottle", alternative_co2_kg: 0.4, alternative_pros: ["Food-grade 18/8 stainless steel", "Hot/cold 24 hours"], alternative_cons: ["Slightly heavier to carry"], saving_kg: 1.1, saving_message: "Milton steel bottle saves 1.1 kg CO₂ and eliminates plastic waste!" };
+  }
+  if (/\b(mat|rug|doormat|carpet)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 8, severity: "medium", analogy: "This synthetic mat releases microplastics every time it rains, polluting groundwater.", credit_delta: -10, current_pros: ["Low price", "Easy to wash"], current_cons: ["Synthetic polyester", "Microplastics, non-biodegradable"], alternative_name: "Onlymat Natural Jute Door Mat", alternative_co2_kg: 2.8, alternative_pros: ["100% natural biodegradable jute", "Handwoven, durable"], alternative_cons: ["Dry clean or brush clean only"], saving_kg: 5.2, saving_message: "Onlymat Jute Mat saves 5.2 kg CO₂ and eliminates plastic footprint!" };
+  }
+  if (/\b(bag|backpack|garbage|trash bin)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 2, severity: "medium", analogy: "These plastic bags stay in our ecosystem for 400+ years, harming wildlife.", credit_delta: -8, current_pros: ["Extremely cheap", "Waterproof"], current_cons: ["Virgin petroleum plastic", "Harmful chemical leaching"], alternative_name: "Beco Compostable Garbage Bags (corn starch)", alternative_co2_kg: 0.5, alternative_pros: ["Decomposes in 180 days", "Zero microplastics"], alternative_cons: ["Not for sharp objects or hot liquids"], saving_kg: 1.5, saving_message: "Beco compostable bags save 1.5 kg CO₂ and leave zero microplastics!" };
+  }
+  if (/\b(furniture|sofa|mattress|wardrobe|table|chair|desk|bed)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 60, severity: "high", analogy: "Manufacturing this furniture emits carbon equivalent to driving 300 km in a petrol car.", credit_delta: -22, current_pros: ["Sturdy construction", "Convenient size"], current_cons: ["Virgin wood or high-footprint metal", "Heavy shipping emissions"], alternative_name: "Reclaimed Wood Furniture (same type)", alternative_co2_kg: 18, alternative_pros: ["100% recycled/reclaimed wood", "Saves forest timber"], alternative_cons: ["Natural texture variations"], saving_kg: 42, saving_message: "Choosing reclaimed wood saves 42 kg CO₂ and protects forests!" };
+  }
+  if (/\b(detergent|dishwash|shampoo|bodywash|handwash|cleaner|soap)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 2.5, severity: "medium", analogy: "Chemical detergents contain phosphates that cause toxic algal blooms in Indian lakes.", credit_delta: -10, current_pros: ["Strong synthetic foam", "Scented fragrances"], current_cons: ["Synthetic toxins", "Plastic container waste"], alternative_name: "Beco Natural Plant-Based Dishwash Liquid", alternative_co2_kg: 0.8, alternative_pros: ["Plant-based, baby-safe", "Coconut extract base"], alternative_cons: ["Slightly less lather than synthetic"], saving_kg: 1.7, saving_message: "Beco natural dishwash saves 1.7 kg CO₂ and keeps lakes clean!" };
+  }
+  if (/\b(toy|doll|puzzle|game)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 6, severity: "medium", analogy: "Plastic toys take centuries to degrade — they will outlast your grandchildren.", credit_delta: -10, current_pros: ["Colorful and cheap", "Waterproof"], current_cons: ["Toxic plastics", "Non-recyclable"], alternative_name: "Shumee Wooden Eco Toy (same play type)", alternative_co2_kg: 1.2, alternative_pros: ["Natural wood", "Non-toxic child-safe paints"], alternative_cons: ["Heavier than plastic"], saving_kg: 4.8, saving_message: "Shumee wooden toys save 4.8 kg CO₂ and are completely safe!" };
+  }
+  if (/\b(pot|planter|garden|plant|seeds)\b/.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 5, severity: "medium", analogy: "Plastic plant pots are made from oil — every pot is a tiny fossil fuel investment.", credit_delta: -8, current_pros: ["Lightweight", "Very cheap"], current_cons: ["Virgin petroleum plastic", "Non-biodegradable"], alternative_name: "Beco Biodegradable Coir Pots", alternative_co2_kg: 1, alternative_pros: ["100% organic coconut coir", "Biodegradable, enriches soil"], alternative_cons: ["Fragile over multiple seasons"], saving_kg: 4, saving_message: "Beco coir pots save 4.0 kg CO₂ and eliminate plastic waste!" };
+  }
+  // ── LED / lighting — already the greenest choice ────────────────────────
+  if (/\b(led|cfl|energy.sav|night.?lamp|bulb|tube.?light|downlight|spotlight|strip.?light|fairy.?light|desk.?lamp|floor.?lamp|table.?lamp|reading.?lamp|smart.?light|tubelight)\b/i.test(item)) {
+    return { is_sustainable_choice: true, co2_kg: 2.0, severity: "low", analogy: "An LED bulb uses 80% less electricity than an incandescent — one of the easiest wins for the planet.", credit_delta: 10, current_pros: ["LED is already the most energy-efficient lighting tech", "Lasts 15,000–25,000 hours"], current_cons: ["Contains small amounts of electronics that need responsible disposal"], alternative_name: "", alternative_co2_kg: 0, alternative_pros: [], alternative_cons: [], saving_kg: 0, saving_message: "Great choice! LED lighting is already the eco-friendly standard. 🏆" };
+  }
+  // ── Small appliances ────────────────────────────────────────────────────
+  if (/\b(fan|ceiling.fan|table.fan|pedestal.fan|exhaust.fan)\b/i.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 18, severity: "medium", analogy: "Manufacturing this fan emits as much CO₂ as running it on electricity for 2 years.", credit_delta: -12, current_pros: ["Affordable cooling", "Low running cost"], current_cons: ["Non-recyclable plastic parts", "Manufacturing emissions"], alternative_name: "BLDC Ceiling Fan (same brand/size)", alternative_co2_kg: 18, alternative_pros: ["Uses 65% less electricity than standard fans", "Saves ~1,200 kWh over lifetime"], alternative_cons: ["Higher upfront cost"], saving_kg: 12, saving_message: "A BLDC fan saves electricity equivalent to 12 kg CO₂ over its lifetime!" };
+  }
+  if (/\b(charger|cable|usb|power.bank|adapter|extension.cord|power.strip)\b/i.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 3, severity: "low", analogy: "Electronics accessories have a small but real footprint from plastic and copper mining.", credit_delta: -5, current_pros: ["Essential accessory", "Widely compatible"], current_cons: ["Short product lifespan", "Hard to recycle mixed materials"], alternative_name: "GaN Fast Charger (same wattage, smaller, lasts longer)", alternative_co2_kg: 2, alternative_pros: ["50% smaller, lasts 2× longer", "GaN tech runs cooler — less heat damage"], alternative_cons: ["Slightly higher price"], saving_kg: 1, saving_message: "A quality GaN charger lasts longer and saves 1 kg CO₂ over repeated replacements!" };
+  }
+  if (/\b(watch|clock|alarm)\b/i.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 8, severity: "medium", analogy: "Manufacturing this watch uses rare metals mined with significant environmental impact.", credit_delta: -8, current_pros: ["Reliable timekeeping", "Stylish accessory"], current_cons: ["Rare metal mining", "Battery creates e-waste"], alternative_name: "Solar-Powered Watch (same style)", alternative_co2_kg: 3, alternative_pros: ["No battery replacements ever", "Charges from any light source"], alternative_cons: ["Needs occasional light exposure to charge"], saving_kg: 5, saving_message: "A solar watch eliminates battery waste and saves 5 kg CO₂!" };
+  }
+  if (/\b(pen|pencil|notebook|diary|stationery|paper)\b/i.test(item)) {
+    return { is_sustainable_choice: false, co2_kg: 1, severity: "low", analogy: "Paper stationery has a modest footprint, but recycled alternatives cut it by 60%.", credit_delta: -3, current_pros: ["Affordable", "Widely available"], current_cons: ["Virgin wood pulp", "Bleaching uses chemicals"], alternative_name: "Recycled Paper Notebook (same size)", alternative_co2_kg: 0.4, alternative_pros: ["100% recycled paper", "No new trees cut"], alternative_cons: ["Slightly off-white pages"], saving_kg: 0.6, saving_message: "Recycled notebooks save 0.6 kg CO₂ and protect forests!" };
+  }
   return smartGenericFallback(item);
 }
 
 /**
  * Extracts the core product noun from the item name and returns a specific,
  * relevant alternative. Never returns 'Eco-friendly version of the same product'.
+ * @param {string} item Item name
+ * @returns {Object} Fallback result
  */
 function smartGenericFallback(item) {
   // Strip common noise words to find the core product noun
@@ -312,7 +401,7 @@ async function callGemini(prompt, apiKey, endpointUrl) {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 1024,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
     },
   };
 
@@ -339,7 +428,7 @@ async function callGemini(prompt, apiKey, endpointUrl) {
     clearTimeout(timeout);
 
     if (res.status === 429 && attempt < 2) {
-      await new Promise((r) => setTimeout(r, (attempt + 1) * 6000));
+      await new Promise((r) => setTimeout(r, (attempt + 1) * RETRY_DELAY_MS));
       continue;
     }
 
@@ -379,12 +468,7 @@ export function parseGeminiResponse(raw) {
     throw new Error(`JSON_PARSE_FAILED: ${e.message}`);
   }
 
-  const required = [
-    "co2_kg", "severity", "analogy", "credit_delta",
-    "current_pros", "current_cons", "alternative_name", "alternative_co2_kg",
-    "alternative_pros", "alternative_cons", "saving_kg", "saving_message",
-  ];
-  for (const f of required) {
+  for (const f of REQUIRED_FIELDS) {
     if (parsed[f] === undefined) throw new Error(`MISSING_FIELD:${f}`);
   }
 
@@ -405,6 +489,7 @@ export function parseGeminiResponse(raw) {
 
   parsed.alternative_co2_kg = Math.max(0, Number(parsed.alternative_co2_kg) || 0);
   parsed.saving_kg          = Math.max(0, Number(parsed.saving_kg) || 0);
+  parsed.co2_kg             = Math.max(0, Number(parsed.co2_kg) || 0);
 
   // Coerce arrays
   if (!Array.isArray(parsed.current_pros))     parsed.current_pros = [String(parsed.current_pros)];
@@ -483,28 +568,53 @@ export async function analyzeCarbon(input) {
   return { ...staticFallback(input.itemName, input.category), fromCache: false, usedFallback: true };
 }
 
+/**
+ * Sanitizes string for prompt inclusion
+ * @param {string} str Input string
+ * @returns {string} Sanitized string
+ */
 export function sanitizeForPrompt(str) {
   return sanitize(str);
 }
 
+/**
+ * Clamps credit delta to valid range
+ * @param {number} delta Input delta
+ * @returns {number} Clamped delta
+ */
 export function clampCreditDelta(delta) {
   return Math.max(-60, Math.min(30, Math.round(Number(delta) || 0)));
 }
 
+/**
+ * Validates a parsed carbon result
+ * @param {Object} result Parsed result
+ * @returns {boolean} True if valid
+ */
 export function validateCarbonResult(result) {
-  const required = ["co2_kg", "analogy", "alternative_name", "alternative_co2_kg", "credit_delta", "saving_message", "severity"];
-  for (const field of required) {
+  for (const field of REQUIRED_FIELDS) {
     if (result[field] === undefined) throw new Error(`Missing field: ${field}`);
   }
   return true;
 }
 
+/**
+ * Parses carbon response from raw text
+ * @param {string} rawText Raw text
+ * @returns {Object} Parsed response
+ */
 export function parseCarbonResponse(rawText) {
   const cleaned = rawText.replace(/```json|```/g, "").trim();
   return JSON.parse(cleaned);
 }
 
+/**
+ * Builds a valid cache key
+ * @param {string} itemName Item name
+ * @param {string} category Category name
+ * @returns {string} Cache key
+ */
 export function buildCacheKey(itemName, category) {
   const rawKey = `${category}_${itemName}`;
-  return sanitize(rawKey).toLowerCase().replace(/\s+/g, "_").slice(0, 120);
+  return sanitize(rawKey).toLowerCase().replace(/\s+/g, "_").slice(0, MAX_CACHE_KEY_LENGTH);
 }

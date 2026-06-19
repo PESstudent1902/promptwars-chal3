@@ -37,7 +37,6 @@ import { recordAction, getScoreState, getMonthlySummary, saveUser } from "../uti
 // Prevents SSRF: a compromised content script cannot instruct the extension
 // to fetch internal network addresses (localhost, RFC-1918 ranges, file://).
 
-/** @type {ReadonlySet<string>} */
 const ALLOWED_FETCH_HOSTNAMES = Object.freeze(new Set([
   "www.amazon.in",
   "amazon.in",
@@ -45,7 +44,31 @@ const ALLOWED_FETCH_HOSTNAMES = Object.freeze(new Set([
   "flipkart.com",
   "www.myntra.com",
   "myntra.com",
-]));
+ ]));
+
+const DEBUG = false;
+
+// ─── File-level constants for Alarms, Colors, and Thresholds ──────────────────
+const ALARM_NAME = "weeklyDigest";
+const ALARM_PERIOD_MINUTES = 60 * 24 * 7;
+const ALARM_DELAY_MINUTES = 60 * 24 * 7;
+
+const DEFAULT_SCORE = 500;
+
+const SCORE_THRESHOLD_GREEN = 650;
+const SCORE_THRESHOLD_YELLOW = 500;
+
+const BADGE_COLOR_GREEN = "#1a9e6e";
+const BADGE_COLOR_YELLOW = "#e6a817";
+const BADGE_COLOR_RED = "#c0392b";
+
+const FETCH_MAX_BYTES = 2 * 1024 * 1024; // 2MB
+
+function logDebug(...args) {
+  if (DEBUG) {
+    console.log("[EcoScore BG]", ...args);
+  }
+}
 
 /**
  * Validate that a URL is safe to fetch.
@@ -148,7 +171,38 @@ async function handleFetchHtml(url) {
   });
 
   if (!res.ok) throw new Error("HTTP_" + res.status);
-  return await res.text();
+
+  const contentLength = res.headers.get("content-length");
+  if (contentLength && parseInt(contentLength, 10) > FETCH_MAX_BYTES) {
+    throw new Error("Response size limit exceeded");
+  }
+
+  if (res.body) {
+    const reader = res.body.getReader();
+    let receivedLength = 0;
+    const chunks = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedLength += value.length;
+      if (receivedLength > FETCH_MAX_BYTES) {
+        reader.cancel();
+        throw new Error("Response size limit exceeded");
+      }
+      chunks.push(value);
+    }
+    const concatenated = new Uint8Array(receivedLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      concatenated.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return new TextDecoder("utf-8").decode(concatenated);
+  } else {
+    const text = await res.text();
+    if (text.length > FETCH_MAX_BYTES) throw new Error("Response size limit exceeded");
+    return text;
+  }
 }
 
 // ─── DuckDuckGo Instant Answer — free, no key ─────────────────────────────────
@@ -167,9 +221,9 @@ async function handleDdgSearch(query) {
   const safe = query.trim().slice(0, 120);
   const url  = `https://api.duckduckgo.com/?q=${encodeURIComponent(safe)}&format=json&no_redirect=1&no_html=1&skip_disambig=1`;
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
   try {
-    const controller = new AbortController();
-    setTimeout(() => controller.abort(), 5000);
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) return { abstract: "", relatedTopics: [] };
 
@@ -183,6 +237,8 @@ async function handleDdgSearch(query) {
     return { abstract, relatedTopics };
   } catch {
     return { abstract: "", relatedTopics: [] };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -217,6 +273,17 @@ function evictStaleRecentCalls() {
  * @returns {Promise<Object>} Carbon analysis result, or { debounced: true }
  */
 async function handleAnalyze(payload) {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Invalid payload: must be an object");
+  }
+  if (!payload.itemName || typeof payload.itemName !== "string" || payload.itemName.trim() === "") {
+    throw new Error("Invalid payload: itemName must be a non-empty string");
+  }
+  const validCategories = new Set(["food", "cab", "ecommerce", "travel"]);
+  if (!payload.category || !validCategories.has(payload.category)) {
+    throw new Error("Invalid payload: category must be food, cab, ecommerce, or travel");
+  }
+
   const key = `${payload.itemName}_${payload.category}`
     .toLowerCase()
     .replace(/\s+/g, "_")
@@ -242,10 +309,23 @@ async function handleAnalyze(payload) {
  * @returns {Promise<Object>} Updated score state
  */
 async function handleRecord(payload) {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Invalid payload: must be an object");
+  }
+  if (!payload.label || typeof payload.label !== "string" || payload.label.trim() === "") {
+    throw new Error("Invalid payload: label must be a non-empty string");
+  }
+  const validCategories = new Set(["food", "cab", "ecommerce", "travel"]);
+  if (!payload.category || !validCategories.has(payload.category)) {
+    throw new Error("Invalid payload: category must be food, cab, ecommerce, or travel");
+  }
+
   const result = await recordAction(payload);
 
   const score = result.newTotal;
-  const color = score >= 650 ? "#1a9e6e" : score >= 500 ? "#e6a817" : "#c0392b";
+  const color = score >= SCORE_THRESHOLD_GREEN ? BADGE_COLOR_GREEN
+              : score >= SCORE_THRESHOLD_YELLOW ? BADGE_COLOR_YELLOW
+              : BADGE_COLOR_RED;
   chrome.action.setBadgeText({ text: String(score) });
   chrome.action.setBadgeBackgroundColor({ color });
 
@@ -286,29 +366,30 @@ async function handleSignOut() {
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
 
-chrome.runtime.onInstalled.addListener(async () => {
-  chrome.action.setBadgeText({ text: "500" });
-  chrome.action.setBadgeBackgroundColor({ color: "#e6a817" });
-
-  chrome.alarms.create("weeklyDigest", {
-    periodInMinutes: 60 * 24 * 7,
-    delayInMinutes: 60 * 24 * 7,
+function setupWeeklyAlarm() {
+  chrome.alarms.create(ALARM_NAME, {
+    periodInMinutes: ALARM_PERIOD_MINUTES,
+    delayInMinutes: ALARM_DELAY_MINUTES,
   });
+}
 
-  console.log("[EcoScore] Extension installed/updated v1.2.0.");
+chrome.runtime.onInstalled.addListener(async () => {
+  chrome.action.setBadgeText({ text: String(DEFAULT_SCORE) });
+  chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR_YELLOW });
+
+  setupWeeklyAlarm();
+
+  logDebug("Extension installed/updated v1.2.0.");
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  chrome.alarms.create("weeklyDigest", {
-    periodInMinutes: 60 * 24 * 7,
-    delayInMinutes: 60 * 24 * 7,
-  });
+  setupWeeklyAlarm();
 });
 
 // ─── Notifications ────────────────────────────────────────────────────────────
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== "weeklyDigest") return;
+  if (alarm.name !== ALARM_NAME) return;
   try {
     const [state, summary] = await Promise.all([getScoreState(), getMonthlySummary()]);
     const msg = summary.greened > 0

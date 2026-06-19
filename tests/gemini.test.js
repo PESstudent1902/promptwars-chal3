@@ -40,6 +40,14 @@ describe("sanitizeForPrompt", () => {
     expect(sanitizeForPrompt("Chicken Biryani")).toBe("Chicken Biryani");
     expect(sanitizeForPrompt("Dal Makhani")).toBe("Dal Makhani");
   });
+
+  test("handles empty string", () => {
+    expect(sanitizeForPrompt("")).toBe("");
+  });
+
+  test("handles multiple consecutive control characters", () => {
+    expect(sanitizeForPrompt("\x00\x01\x02abc\x03\x04")).toBe("abc");
+  });
 });
 
 // ─── clampCreditDelta ─────────────────────────────────────────────────────────
@@ -65,6 +73,17 @@ describe("clampCreditDelta", () => {
     expect(clampCreditDelta(14.7)).toBe(15);
     expect(clampCreditDelta(-5.3)).toBe(-5);
   });
+
+  test("clamping boundary values", () => {
+    expect(clampCreditDelta(-60)).toBe(-60);
+    expect(clampCreditDelta(30)).toBe(30);
+  });
+
+  test("handles invalid inputs by returning 0", () => {
+    expect(clampCreditDelta("not a number")).toBe(0);
+    expect(clampCreditDelta(null)).toBe(0);
+    expect(clampCreditDelta(undefined)).toBe(0);
+  });
 });
 
 // ─── validateCarbonResult ─────────────────────────────────────────────────────
@@ -78,6 +97,11 @@ describe("validateCarbonResult", () => {
     credit_delta: -12,
     saving_message: "Switching saves 1.4 kg CO2.",
     severity: "medium",
+    current_pros: ["pro1"],
+    current_cons: ["con1"],
+    alternative_pros: ["altPro1"],
+    alternative_cons: ["altCon1"],
+    saving_kg: 1.4,
   };
 
   test("passes for a complete valid result", () => {
@@ -145,7 +169,7 @@ describe("cache key generation", () => {
   });
 
   test("same item always produces same key", () => {
-    expect(buildCacheKey("Ola Mini", "cab")).toBe(buildCacheKey("cab_ola_mini"));
+    expect(buildCacheKey("Ola Mini", "cab")).toBe("cab_ola_mini");
   });
 
   test("different categories produce different keys", () => {

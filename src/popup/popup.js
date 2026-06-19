@@ -10,6 +10,28 @@
  * - Toast notifications
  */
 
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const DEFAULT_SCORE = 500;
+const MAX_SCORE = 1000;
+const RING_CIRCUMFERENCE = 263.9;
+const ANIMATION_DURATION_MS = 600;
+
+const TIER_CHAMPION_LIMIT = 800;
+const TIER_MOVER_LIMIT = 650;
+const TIER_AWARE_LIMIT = 500;
+const TIER_LEARNING_LIMIT = 350;
+
+const MS_IN_MINUTE = 60000;
+const MS_IN_HOUR = 3600000;
+const MS_IN_DAY = 86400000;
+
+const SHARE_CARD_WIDTH = 600;
+const SHARE_CARD_HEIGHT = 315;
+
+const HISTORY_MAX_ITEMS = 8;
+const GEOLOCATION_TIMEOUT_MS = 8000;
+
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
 
 const $ = (id) => document.getElementById(id);
@@ -58,6 +80,10 @@ async function init() {
   try {
     // Check API key
     const { gemini_api_key } = await chrome.storage.local.get(["gemini_api_key"]);
+    if (chrome.runtime.lastError) {
+      showOnly(noKeyState);
+      return;
+    }
     if (!gemini_api_key) {
       showOnly(noKeyState);
       return;
@@ -68,6 +94,12 @@ async function init() {
       chrome.runtime.sendMessage({ type: "GET_SCORE_STATE" }),
       chrome.runtime.sendMessage({ type: "GET_MONTHLY_SUMMARY" }),
     ]);
+
+    if (chrome.runtime.lastError) {
+      console.error("[EcoScore popup] Error loading state:", chrome.runtime.lastError);
+      showOnly(noKeyState);
+      return;
+    }
 
     renderScore(state, summary);
 
@@ -90,24 +122,24 @@ async function init() {
 // ─── Render score ─────────────────────────────────────────────────────────────
 
 function renderScore(state, summary) {
-  const score = state.total ?? 500;
-  const streak = state.streak ?? 0;
+  const score = state?.total ?? DEFAULT_SCORE;
+  const streak = state?.streak ?? 0;
 
   // Animate score number
-  animateNumber(scoreNumber, 0, score, 600);
+  animateNumber(scoreNumber, 0, score, ANIMATION_DURATION_MS);
 
-  // Ring fill: score 0–1000 mapped to 0–263.9 (circumference)
-  const pct = Math.min(score / 1000, 1); // 1000 = full ring
-  const dashOffset = 263.9 * (1 - pct);
+  // Ring fill: score mapped to circumference
+  const pct = Math.min(score / MAX_SCORE, 1);
+  const dashOffset = RING_CIRCUMFERENCE * (1 - pct);
   setTimeout(() => {
     if (ringFill) {
       ringFill.style.strokeDashoffset = dashOffset;
       // Color by score
       ringFill.style.stroke =
-        score >= 800 ? "#1a9e6e" :
-        score >= 650 ? "#25c98a" :
-        score >= 500 ? "#e6a817" :
-        score >= 350 ? "#e07b39" : "#c0392b";
+        score >= TIER_CHAMPION_LIMIT ? "#1a9e6e" :
+        score >= TIER_MOVER_LIMIT ? "#25c98a" :
+        score >= TIER_AWARE_LIMIT ? "#e6a817" :
+        score >= TIER_LEARNING_LIMIT ? "#e07b39" : "#c0392b";
     }
   }, 100);
 
@@ -125,10 +157,10 @@ function renderScore(state, summary) {
   // Monthly stats
   if (statGreened) statGreened.textContent = summary?.greened ?? 0;
   if (statSaved) statSaved.textContent   = `${summary?.saved_kg ?? 0}`;
-  if (statRank) statRank.textContent    = state.rank ? `#${state.rank}` : "—";
+  if (statRank) statRank.textContent    = state?.rank ? `#${state.rank}` : "—";
 
   // History
-  renderHistory(state.history ?? []);
+  renderHistory(state?.history ?? []);
 }
 
 function renderUser(user) {
@@ -165,7 +197,7 @@ function renderHistory(history) {
   }
   if (historyEmpty) historyEmpty.setAttribute("hidden", "");
 
-  const recent = history.slice(0, 8);
+  const recent = history.slice(0, HISTORY_MAX_ITEMS);
 
   recent.forEach((item) => {
     const li = document.createElement("li");
@@ -215,6 +247,8 @@ function renderHistory(history) {
 
 async function initLocation() {
   const { user_location } = await chrome.storage.local.get(["user_location"]);
+  if (chrome.runtime.lastError) return;
+
   if (user_location?.city) {
     if (locationLabel) locationLabel.textContent = user_location.city;
     if (locationRow) locationRow.removeAttribute("hidden");
@@ -228,10 +262,10 @@ async function initLocation() {
 // ─── Tier helper (mirrors score.js but works in popup context) ────────────────
 
 function getTier(score) {
-  if (score >= 800) return { label: "EcoChampion", emoji: "🌿", bg: "#e8f8f1", text: "#1a5c3e" };
-  if (score >= 650) return { label: "GreenMover",  emoji: "🌱", bg: "#eef6f1", text: "#2d8a5e" };
-  if (score >= 500) return { label: "Aware",        emoji: "🌾", bg: "#fdf7e4", text: "#a07800" };
-  if (score >= 350) return { label: "Learning",     emoji: "🍂", bg: "#fdf0e6", text: "#a04a0a" };
+  if (score >= TIER_CHAMPION_LIMIT) return { label: "EcoChampion", emoji: "🌿", bg: "#e8f8f1", text: "#1a5c3e" };
+  if (score >= TIER_MOVER_LIMIT) return { label: "GreenMover",  emoji: "🌱", bg: "#eef6f1", text: "#2d8a5e" };
+  if (score >= TIER_AWARE_LIMIT) return { label: "Aware",        emoji: "🌾", bg: "#fdf7e4", text: "#a07800" };
+  if (score >= TIER_LEARNING_LIMIT) return { label: "Learning",     emoji: "🍂", bg: "#fdf0e6", text: "#a04a0a" };
   return               { label: "Starting Out", emoji: "🌫️", bg: "#fce8e6", text: "#8b1a10" };
 }
 
@@ -252,9 +286,9 @@ function animateNumber(el, from, to, duration) {
 function formatRelativeTime(isoString) {
   try {
     const diff = Date.now() - new Date(isoString).getTime();
-    const mins  = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-    const days  = Math.floor(diff / 86400000);
+    const mins  = Math.floor(diff / MS_IN_MINUTE);
+    const hours = Math.floor(diff / MS_IN_HOUR);
+    const days  = Math.floor(diff / MS_IN_DAY);
     if (mins < 1)   return "just now";
     if (mins < 60)  return `${mins}m ago`;
     if (hours < 24) return `${hours}h ago`;
@@ -279,50 +313,58 @@ function showToast(message, duration = 2500) {
 
 // ─── Share rank card ──────────────────────────────────────────────────────────
 
+function drawShareCard(canvas, ctx, score, tier, streak) {
+  // Background
+  const grad = ctx.createLinearGradient(0, 0, SHARE_CARD_WIDTH, SHARE_CARD_HEIGHT);
+  grad.addColorStop(0, "#0d2b1f");
+  grad.addColorStop(1, "#1a5c3e");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, SHARE_CARD_WIDTH, SHARE_CARD_HEIGHT);
+
+  // Score
+  ctx.fillStyle = "#25c98a";
+  ctx.font = "bold 80px -apple-system, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(score, 60, 160);
+
+  ctx.fillStyle = "#9ab8a6";
+  ctx.font = "18px -apple-system, sans-serif";
+  ctx.fillText("EcoScore", 60, 190);
+
+  // Tier
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 22px -apple-system, sans-serif";
+  ctx.fillText(`${tier.emoji} ${tier.label}`, 60, 240);
+
+  // Streak
+  ctx.fillStyle = "#e6a817";
+  ctx.font = "bold 18px -apple-system, sans-serif";
+  ctx.fillText(`🔥 ${streak} day streak`, 60, 275);
+
+  // Brand
+  ctx.fillStyle = "#4d7a5e";
+  ctx.font = "bold 14px -apple-system, sans-serif";
+  ctx.textAlign = "right";
+  ctx.fillText("EcoScore · Carbon Awareness", 540, 295);
+}
+
 async function generateShareCard() {
   try {
     const state = await chrome.runtime.sendMessage({ type: "GET_SCORE_STATE" });
-    const score = state.total ?? 500;
+    if (chrome.runtime.lastError) {
+      showToast("Could not retrieve score state.");
+      return;
+    }
+    const score = state?.total ?? DEFAULT_SCORE;
     const tier  = getTier(score);
-    const streak = state.streak ?? 0;
+    const streak = state?.streak ?? 0;
 
     const canvas = document.createElement("canvas");
-    canvas.width  = 600;
-    canvas.height = 315;
+    canvas.width  = SHARE_CARD_WIDTH;
+    canvas.height = SHARE_CARD_HEIGHT;
     const ctx = canvas.getContext("2d");
 
-    // Background
-    const grad = ctx.createLinearGradient(0, 0, 600, 315);
-    grad.addColorStop(0, "#0d2b1f");
-    grad.addColorStop(1, "#1a5c3e");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 600, 315);
-
-    // Score
-    ctx.fillStyle = "#25c98a";
-    ctx.font = "bold 80px -apple-system, sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillText(score, 60, 160);
-
-    ctx.fillStyle = "#9ab8a6";
-    ctx.font = "18px -apple-system, sans-serif";
-    ctx.fillText("EcoScore", 60, 190);
-
-    // Tier
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 22px -apple-system, sans-serif";
-    ctx.fillText(`${tier.emoji} ${tier.label}`, 60, 240);
-
-    // Streak
-    ctx.fillStyle = "#e6a817";
-    ctx.font = "bold 18px -apple-system, sans-serif";
-    ctx.fillText(`🔥 ${streak} day streak`, 60, 275);
-
-    // Brand
-    ctx.fillStyle = "#4d7a5e";
-    ctx.font = "bold 14px -apple-system, sans-serif";
-    ctx.textAlign = "right";
-    ctx.fillText("EcoScore · Carbon Awareness", 540, 295);
+    drawShareCard(canvas, ctx, score, tier, streak);
 
     // Convert to blob and copy
     canvas.toBlob(async (blob) => {
@@ -354,6 +396,10 @@ $("signin-btn")?.addEventListener("click", async () => {
   try {
     showToast("Signing in…");
     const result = await chrome.runtime.sendMessage({ type: "SIGN_IN" });
+    if (chrome.runtime.lastError) {
+      showToast("Sign-in failed. Try again.");
+      return;
+    }
     if (result?.success) {
       showToast(`Welcome, ${result.user.name}! 🌿`);
       setTimeout(init, 800);
@@ -367,9 +413,12 @@ $("skip-signin-btn")?.addEventListener("click", () => {
   showOnly(scoreView);
   // Still boot score loading
   chrome.storage.local.get(["gemini_api_key"]).then(({ gemini_api_key }) => {
+    if (chrome.runtime.lastError) return;
     if (gemini_api_key) {
       chrome.runtime.sendMessage({ type: "GET_SCORE_STATE" }).then((state) => {
+        if (chrome.runtime.lastError) return;
         chrome.runtime.sendMessage({ type: "GET_MONTHLY_SUMMARY" }).then((summary) => {
+          if (chrome.runtime.lastError) return;
           renderScore(state, summary);
           initLocation();
         });
@@ -380,6 +429,10 @@ $("skip-signin-btn")?.addEventListener("click", () => {
 
 $("signout-btn")?.addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "SIGN_OUT" });
+  if (chrome.runtime.lastError) {
+    showToast("Sign-out failed.");
+    return;
+  }
   showToast("Signed out.");
   setTimeout(init, 600);
 });
@@ -388,6 +441,10 @@ $("share-btn")?.addEventListener("click", generateShareCard);
 
 enableLocBtn?.addEventListener("click", () => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (chrome.runtime.lastError) {
+      showToast("Could not query current tab.");
+      return;
+    }
     const tabId = tabs[0]?.id;
     if (!tabId) {
       showToast("Open any website tab first, then enable location.");
@@ -400,10 +457,14 @@ enableLocBtn?.addEventListener("click", () => {
         navigator.geolocation.getCurrentPosition(
           (p) => res({ lat: p.coords.latitude, lng: p.coords.longitude }),
           () => res(null),
-          { timeout: 8000 }
+          { timeout: GEOLOCATION_TIMEOUT_MS }
         );
       }),
     }, async (results) => {
+      if (chrome.runtime.lastError) {
+        showToast("Location access query failed.");
+        return;
+      }
       const coords = results?.[0]?.result;
       if (!coords) {
         showToast("Location access denied. Allow location in your browser.");

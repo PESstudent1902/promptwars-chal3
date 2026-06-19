@@ -3,6 +3,8 @@
  * Handles API key save/test/clear and data reset.
  */
 
+import { isValidApiKeyFormat } from "../utils/gemini.js";
+
 const apiKeyInput   = document.getElementById("api-key-input");
 const toggleVisBtn  = document.getElementById("toggle-visibility");
 const eyeIcon       = document.getElementById("eye-icon");
@@ -20,35 +22,59 @@ const dialogCancel  = document.getElementById("dialog-cancel");
 // ─── Load existing key on open ────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", async () => {
-  const { gemini_api_key } = await chrome.storage.local.get(["gemini_api_key"]);
-  if (gemini_api_key) {
-    apiKeyInput.value = gemini_api_key;
-    setStatus("Key saved and ready. ✓", "success");
+  try {
+    const { gemini_api_key } = await chrome.storage.local.get(["gemini_api_key"]);
+    if (chrome.runtime.lastError) {
+      setStatus("Error loading settings: " + chrome.runtime.lastError.message, "error");
+      return;
+    }
+    if (gemini_api_key) {
+      apiKeyInput.value = gemini_api_key;
+      setStatus("Key saved and ready. ✓", "success");
+    }
+  } catch (err) {
+    setStatus("Error loading settings: " + err.message, "error");
   }
 });
 
 // ─── Toggle visibility ────────────────────────────────────────────────────────
 
 toggleVisBtn.addEventListener("click", () => {
-  const show = apiKeyInput.type === "password";
-  apiKeyInput.type = show ? "text" : "password";
-  eyeIcon.textContent = show ? "🙈" : "👁";
-  toggleVisBtn.setAttribute("aria-label", show ? "Hide API key" : "Show API key");
+  try {
+    const show = apiKeyInput.type === "password";
+    apiKeyInput.type = show ? "text" : "password";
+    eyeIcon.textContent = show ? "🙈" : "👁";
+    toggleVisBtn.setAttribute("aria-label", show ? "Hide API key" : "Show API key");
+  } catch (err) {
+    console.error("Toggle visibility failed:", err);
+  }
 });
 
 // ─── Save ─────────────────────────────────────────────────────────────────────
 
-function isValidApiKeyFormat(key) {
-  // Accept any non-empty string — let the Gemini API itself reject invalid keys
-  return !!(key && typeof key === "string" && key.trim().length > 0);
-}
-
 saveKeyBtn.addEventListener("click", async () => {
-  const key = apiKeyInput.value.trim();
-  if (!key) { setStatus("Please enter your API key.", "error"); apiKeyInput.focus(); return; }
-  await chrome.storage.local.set({ gemini_api_key: key });
-  setStatus("Key saved successfully. ✓", "success");
-  showToast("API key saved!");
+  try {
+    const key = apiKeyInput.value.trim();
+    if (!key) {
+      setStatus("Please enter your API key.", "error");
+      apiKeyInput.focus();
+      return;
+    }
+    if (!isValidApiKeyFormat(key)) {
+      setStatus("Invalid API key format. Key should start with 'AIza' and be 20-60 characters long.", "error");
+      apiKeyInput.focus();
+      return;
+    }
+    await chrome.storage.local.set({ gemini_api_key: key });
+    if (chrome.runtime.lastError) {
+      setStatus("Error saving key: " + chrome.runtime.lastError.message, "error");
+      return;
+    }
+    setStatus("Key saved successfully. ✓", "success");
+    showToast("API key saved!");
+  } catch (err) {
+    setStatus("Error saving key: " + err.message, "error");
+  }
 });
 
 // ─── Test connection ──────────────────────────────────────────────────────────
@@ -108,24 +134,48 @@ testKeyBtn.addEventListener("click", async () => {
 // ─── Clear key ────────────────────────────────────────────────────────────────
 
 clearKeyBtn.addEventListener("click", () => {
-  showConfirm("Remove your Gemini API key? EcoScore will use offline estimates until you add a new one.", async () => {
-    await chrome.storage.local.remove(["gemini_api_key"]);
-    apiKeyInput.value = "";
-    setStatus("API key removed.", "");
-    showToast("Key removed.");
-  });
+  try {
+    showConfirm("Remove your Gemini API key? EcoScore will use offline estimates until you add a new one.", async () => {
+      try {
+        await chrome.storage.local.remove(["gemini_api_key"]);
+        if (chrome.runtime.lastError) {
+          setStatus("Error removing key: " + chrome.runtime.lastError.message, "error");
+          return;
+        }
+        apiKeyInput.value = "";
+        setStatus("API key removed.", "");
+        showToast("Key removed.");
+      } catch (err) {
+        setStatus("Error: " + err.message, "error");
+      }
+    });
+  } catch (err) {
+    console.error("Clear key dialog failed:", err);
+  }
 });
 
 // ─── Reset all data ───────────────────────────────────────────────────────────
 
 resetDataBtn.addEventListener("click", () => {
-  showConfirm("Reset ALL EcoScore data? This clears your score, history, streak, and API key. Cannot be undone.", async () => {
-    await chrome.storage.sync.clear();
-    await chrome.storage.local.clear();
-    apiKeyInput.value = "";
-    setStatus("", "");
-    showToast("All data reset. Fresh start!");
-  });
+  try {
+    showConfirm("Reset ALL EcoScore data? This clears your score, history, streak, and API key. Cannot be undone.", async () => {
+      try {
+        await chrome.storage.sync.clear();
+        await chrome.storage.local.clear();
+        if (chrome.runtime.lastError) {
+          setStatus("Error resetting data: " + chrome.runtime.lastError.message, "error");
+          return;
+        }
+        apiKeyInput.value = "";
+        setStatus("", "");
+        showToast("All data reset. Fresh start!");
+      } catch (err) {
+        setStatus("Error: " + err.message, "error");
+      }
+    });
+  } catch (err) {
+    console.error("Reset data dialog failed:", err);
+  }
 });
 
 // ─── Confirm dialog ───────────────────────────────────────────────────────────
@@ -135,28 +185,42 @@ let confirmCb = null;
 function showConfirm(message, onConfirm) {
   dialogMsg.textContent = message;
   confirmCb = onConfirm;
+  confirmDialog.removeAttribute("hidden");
   confirmDialog.classList.add("visible");
   dialogConfirm.focus();
 }
 
 dialogConfirm.addEventListener("click", async () => {
-  confirmDialog.classList.remove("visible");
-  if (confirmCb) await confirmCb();
-  confirmCb = null;
+  try {
+    confirmDialog.classList.remove("visible");
+    confirmDialog.setAttribute("hidden", "");
+    if (confirmCb) await confirmCb();
+  } catch (err) {
+    console.error("Confirm action failed:", err);
+  } finally {
+    confirmCb = null;
+  }
 });
 
 dialogCancel.addEventListener("click", () => {
   confirmDialog.classList.remove("visible");
+  confirmDialog.setAttribute("hidden", "");
   confirmCb = null;
 });
 
 confirmDialog.addEventListener("click", (e) => {
-  if (e.target === confirmDialog) { confirmDialog.classList.remove("visible"); confirmCb = null; }
+  if (e.target === confirmDialog) {
+    confirmDialog.classList.remove("visible");
+    confirmDialog.setAttribute("hidden", "");
+    confirmCb = null;
+  }
 });
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && confirmDialog.classList.contains("visible")) {
-    confirmDialog.classList.remove("visible"); confirmCb = null;
+    confirmDialog.classList.remove("visible");
+    confirmDialog.setAttribute("hidden", "");
+    confirmCb = null;
   }
 });
 

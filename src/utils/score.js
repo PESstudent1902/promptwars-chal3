@@ -27,6 +27,15 @@ const KEYS = Object.freeze({
 /** Maximum number of history entries retained in local storage */
 const MAX_HISTORY = 50;
 
+/** Score tiers and their visual properties */
+const TIERS = Object.freeze([
+  { min: 800, label: "EcoChampion", emoji: "🌿", color: "#1a9e6e" },
+  { min: 650, label: "GreenMover",  emoji: "🌱", color: "#2d8a5e" },
+  { min: 500, label: "Aware",       emoji: "🌾", color: "#e6a817" },
+  { min: 350, label: "Learning",    emoji: "🍂", color: "#e07b39" },
+  { min: 0,   label: "Starting Out",emoji: "🌫️", color: "#c0392b" },
+]);
+
 // ─── Read ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -75,9 +84,13 @@ export async function getScoreState() {
  * @param {number} params.co2Kg       - CO₂ equivalent in kg
  * @param {string} params.analogy     - Gemini analogy text (truncated to 300 chars)
  * @param {string} params.category    - Action category (food | cab | ecommerce | travel)
+ * @param {number} [params.savingKg]  - CO₂ saved in kg
  * @returns {Promise<{ newTotal: number, streak: number, delta: number, entry: Object }>}
  */
-export async function recordAction({ label, site, creditDelta, co2Kg, analogy, category }) {
+export async function recordAction({ label, site, creditDelta, co2Kg, analogy, category, savingKg }) {
+  if (!label || typeof label !== "string") throw new Error("Invalid parameter: label must be a non-empty string");
+  if (!category || typeof category !== "string") throw new Error("Invalid parameter: category must be a non-empty string");
+
   const state = await getScoreState();
   const delta = Math.max(-60, Math.min(30, Math.round(Number(creditDelta) || 0)));
   const newTotal = clampScore(state.total, delta);
@@ -88,6 +101,7 @@ export async function recordAction({ label, site, creditDelta, co2Kg, analogy, c
     site:      String(site     || "").slice(0, 50),
     delta,
     co2Kg:     Number(co2Kg)   || 0,
+    savingKg:  Number(savingKg)|| 0,
     analogy:   String(analogy  || "").slice(0, 300),
     category:  String(category || "").slice(0, 30),
     timestamp: new Date().toISOString(),
@@ -136,14 +150,19 @@ export async function recordAction({ label, site, creditDelta, co2Kg, analogy, c
  * @returns {Promise<void>}
  */
 export async function saveUser(userInfo) {
-  return new Promise((resolve) => {
+  if (!userInfo || typeof userInfo !== "object") throw new Error("Invalid parameter: userInfo must be an object");
+
+  return new Promise((resolve, reject) => {
     chrome.storage.sync.set({
       [KEYS.USER]: {
         name:    String(userInfo.name    || "").slice(0, 100),
         email:   String(userInfo.email   || "").slice(0, 200),
         picture: String(userInfo.picture || "").slice(0, 500),
       },
-    }, resolve);
+    }, () => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve();
+    });
   });
 }
 
@@ -168,13 +187,18 @@ export async function getMonthlySummary() {
  * @returns {{ label: string, emoji: string, color: string }}
  */
 export function getTier(score) {
-  if (score >= 800) return { label: "EcoChampion", emoji: "🌿", color: "#1a9e6e" };
-  if (score >= 650) return { label: "GreenMover",  emoji: "🌱", color: "#2d8a5e" };
-  if (score >= 500) return { label: "Aware",        emoji: "🌾", color: "#e6a817" };
-  if (score >= 350) return { label: "Learning",     emoji: "🍂", color: "#e07b39" };
-  return               { label: "Starting Out",  emoji: "🌫️", color: "#c0392b" };
+  const validScore = Number(score) || 0;
+  for (const tier of TIERS) {
+    if (validScore >= tier.min) return { label: tier.label, emoji: tier.emoji, color: tier.color };
+  }
+  return { label: TIERS[4].label, emoji: TIERS[4].emoji, color: TIERS[4].color };
 }
 
+/**
+ * Returns a message based on the credit delta
+ * @param {number} delta Credit delta
+ * @returns {string} Feedback message
+ */
 export function getDeltaMessage(delta) {
   if (delta >= 20) return "Huge green win! 🌿";
   if (delta >= 10) return "Nice choice for the planet.";
@@ -185,14 +209,33 @@ export function getDeltaMessage(delta) {
   return "Heavy carbon footprint.";
 }
 
+/**
+ * Clamps a score between 0 and 9999
+ * @param {number} total Current total score
+ * @param {number} delta Score change
+ * @returns {number} Clamped score
+ */
 export function clampScore(total, delta) {
   return Math.max(0, Math.min(9999, total + delta));
 }
 
+/**
+ * Trims history to the maximum allowed size
+ * @param {Array} history Action history
+ * @param {number} [max=50] Maximum entries
+ * @returns {Array} Trimmed history
+ */
 export function trimHistory(history, max = 50) {
   return history.slice(0, max);
 }
 
+/**
+ * Updates the user's streak based on recent actions
+ * @param {number} currentStreak Current streak count
+ * @param {string|null} lastActionDate Date of last action
+ * @param {number} delta Score change
+ * @returns {number} New streak count
+ */
 export function updateStreak(currentStreak, lastActionDate, delta) {
   if (delta <= 0) return currentStreak;
   const today = new Date().toDateString();
@@ -201,18 +244,24 @@ export function updateStreak(currentStreak, lastActionDate, delta) {
   return lastActionDate === yesterday ? currentStreak + 1 : 1;
 }
 
+/**
+ * Calculates monthly summary metrics from action history
+ * @param {Array} history Action history
+ * @returns {Object} Monthly summary metrics
+ */
 export function getMonthlySummaryFromHistory(history) {
+  if (!Array.isArray(history)) history = [];
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
 
-  const monthActions = (history || []).filter(
+  const monthActions = history.filter(
     (h) => new Date(h.timestamp).getTime() >= start
   );
 
   const greened  = monthActions.filter((h) => h.delta > 0).length;
   const saved_kg = monthActions
     .filter((h) => h.delta > 0)
-    .reduce((s, h) => s + (h.co2Kg || 0), 0);
+    .reduce((s, h) => s + (Number(h.savingKg) || 0), 0);
 
   const counts = {};
   for (const h of monthActions) counts[h.category] = (counts[h.category] || 0) + 1;

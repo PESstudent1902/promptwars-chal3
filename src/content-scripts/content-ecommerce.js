@@ -12,7 +12,10 @@
   const SITE = hostname.includes("amazon") ? "amazon"
     : hostname.includes("flipkart") ? "flipkart" : "myntra";
 
-  const BANNER_ID = "ecoscore-root";
+  // ── Timing Constants ────────────────────────────────────────────────────────
+  const DEBOUNCE_DELAY_MS = 2000;
+  const INITIAL_DELAY_MS = 2500;
+  const CLICK_DELAY_MS = 300;
 
   const SELECTORS = {
     amazon: {
@@ -265,7 +268,7 @@
 
   // ── DOM helpers ───────────────────────────────────────────────────────────
 
-  function q(sels, root = document) {
+  function queryFirst(sels, root = document) {
     for (const s of sels) { try { const e = root.querySelector(s); if (e) return e; } catch {} }
     return null;
   }
@@ -314,86 +317,164 @@
 
   let lastKey = null, active = false;
 
-  function removeBanner() { document.getElementById(BANNER_ID)?.remove(); }
-
   function extractOriginalImage() {
     const sel = SELECTORS[SITE];
     if (!sel.image) return null;
-    const imgEl = q(sel.image);
+    const imgEl = queryFirst(sel.image);
     return imgEl ? imgEl.getAttribute("src") : null;
   }
 
-  function showBanner(result, label, altInfo, onAccept, onDismiss) {
-    removeBanner();
-    const host = document.createElement("div");
-    host.id = BANNER_ID;
-    host.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:430px;width:calc(100vw - 32px)";
-    host.setAttribute("role", "alertdialog");
-    host.setAttribute("aria-modal", "true");
-    const shadow = host.attachShadow({ mode: "open" });
+  // Helper to validate that URLs are secure and correct
+  function isValidImageUrl(url) {
+    if (!url || typeof url !== "string") return false;
+    return url.startsWith("https://") || url.startsWith("chrome-extension://");
+  }
 
-    // Build card HTML with site-search alternative
-    const originalImage = extractOriginalImage();
-    shadow.innerHTML = buildEcommerceCard(result, label, altInfo, originalImage);
-    document.body.appendChild(host);
+  // ── Sub-templates for buildEcommerceCard ──────────────────────────────
 
-    shadow.getElementById("btn-close").onclick    = () => { removeBanner(); escCleanup(); onDismiss("dismissed"); };
-    shadow.getElementById("btn-proceed").onclick  = () => { removeBanner(); escCleanup(); onDismiss("proceeded"); };
+  function getSeverityConfig(severity) {
+    const sevMap = {
+      low:      { color:"#1a9e6e", label:"Low impact",      icon:"🟢" },
+      medium:   { color:"#e6a817", label:"Moderate impact", icon:"🟡" },
+      high:     { color:"#e07b39", label:"High impact",     icon:"🟠" },
+      critical: { color:"#c0392b", label:"Critical impact", icon:"🔴" },
+    };
+    return sevMap[severity] || sevMap.medium;
+  }
 
-    // "Find on site" button — opens search in same tab or new tab
-    const findBtn = shadow.getElementById("btn-find");
-    
-    // Resolve stable targetUrl for fallback redirect
-    let targetUrl = altInfo?.alternativeUrl;
-    if (!targetUrl && result.alternative_name) {
-      targetUrl = getSearchUrlForProduct(result.alternative_name);
+  function safe(s) {
+    const d = document.createElement("div");
+    d.textContent = String(s || "");
+    return d.innerHTML;
+  }
+
+  function prosTemplate(items, color) {
+    return (Array.isArray(items) ? items : [items]).slice(0, 2).map(p =>
+      `<li style="color:${color};font-size:12px;list-style:none;display:flex;gap:5px;padding:2px 0;line-height:1.4"><span style="flex-shrink:0">✓</span><span>${safe(p)}</span></li>`
+    ).join("");
+  }
+
+  function consTemplate(items) {
+    return (Array.isArray(items) ? items : [items]).slice(0, 2).map(p =>
+      `<li style="color:#999;font-size:12px;list-style:none;display:flex;gap:5px;padding:2px 0;line-height:1.4"><span style="flex-shrink:0">✗</span><span>${safe(p)}</span></li>`
+    ).join("");
+  }
+
+  function buildHeaderTemplate(sev) {
+    return `
+      <div class="hd">
+        <span style="font-size:16px;flex-shrink:0" aria-hidden="true">🌿</span>
+        <h2 class="hd-lbl" id="card-title">Carbon Comparison</h2>
+        <span class="hd-badge">${sev.icon} ${safe(sev.label)}</span>
+        <button class="hd-x" id="btn-close" aria-label="Dismiss">✕</button>
+      </div>
+    `;
+  }
+
+  function buildAnalogyTemplate(analogy, usedFallback) {
+    return `
+      <div class="analogy" id="card-analogy">
+        ${safe(analogy)}
+        ${usedFallback ? '<p class="fallback">⚠ Offline estimate — add Gemini API key for live AI analysis</p>' : ''}
+      </div>
+    `;
+  }
+
+  function buildGridTemplate({ isAlreadyGreen, originalImage, altImg, co2_kg, alternative_co2_kg, pct, altPct, shortLabel, alternative_name, current_pros, current_cons, alternative_pros, alternative_cons, sev }) {
+    if (isAlreadyGreen) {
+      return `
+      <div style="padding: 18px 14px; text-align: center; background: #e8f8f1; border-top: 1px solid #d0f0e0; border-bottom: 1px solid #d0f0e0; display: flex; flex-direction: column; align-items: center; gap: 8px;">
+        <span style="font-size: 32px;" aria-hidden="true">🏆</span>
+        <h3 style="color: #1a5c3e; font-size: 15px; margin: 0; font-weight: 700;">Sustainable Choice!</h3>
+        <p style="color: #27ae60; font-size: 13px; font-weight: 600; line-height: 1.4; max-width: 320px;">
+          This product is already eco-friendly. No greener alternative needed!
+        </p>
+      </div>
+      `;
     }
-    if (!targetUrl) {
-      targetUrl = altInfo?.searchUrl;
+
+    const valOriginalImage = isValidImageUrl(originalImage) ? originalImage : null;
+    const valAltImg = isValidImageUrl(altImg) ? altImg : null;
+
+    return `
+    <div class="grid">
+      <div class="col col-a">
+        <div class="tag tag-a">Your choice</div>
+        ${valOriginalImage ? `
+        <div class="img-container">
+          <img src="${safe(valOriginalImage)}" alt="Original product" class="prod-img" />
+        </div>` : ''}
+        <div class="col-name">${shortLabel}</div>
+        <div class="bar-bg" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Original choice carbon emission ratio"><div class="bar-fill bar-a"></div></div>
+        <span class="co2n co2n-a">${Number(co2_kg).toFixed(1)}</span><span class="co2u"> kg CO₂e</span>
+        <ul>${prosTemplate(current_pros, sev.color)}${consTemplate(current_cons)}</ul>
+      </div>
+      <div class="col col-b">
+        <div class="tag tag-b">Greener choice ✓</div>
+        ${valAltImg ? `
+        <div class="img-container">
+          <img src="${safe(valAltImg)}" alt="Eco alternative" class="prod-img" />
+        </div>` : ''}
+        <div class="col-name">${safe(alternative_name)}</div>
+        <div class="bar-bg" role="progressbar" aria-valuenow="${altPct}" aria-valuemin="0" aria-valuemax="100" aria-label="Alternative choice carbon emission ratio"><div class="bar-fill bar-b"></div></div>
+        <span class="co2n co2n-b">${Number(alternative_co2_kg).toFixed(1)}</span><span class="co2u"> kg CO₂e</span>
+        <ul>${prosTemplate(alternative_pros, "#1a9e6e")}${consTemplate(alternative_cons)}</ul>
+      </div>
+    </div>
+    `;
+  }
+
+  function buildSearchStripTemplate(isAlreadyGreen, isDirectLink, stripeTitle, stripeQuery, stripeBtnText, siteName) {
+    if (isAlreadyGreen) return "";
+    return `
+    <div class="site-strip">
+      <span class="site-strip-icon" aria-hidden="true">${isDirectLink ? '🌿' : '🔍'}</span>
+      <div class="site-strip-body">
+        <div class="site-strip-title">${safe(stripeTitle)}</div>
+        <div class="site-strip-query">${safe(stripeQuery)}</div>
+      </div>
+      <button class="btn-find" id="btn-find" aria-label="${isDirectLink ? 'View' : 'Search'} green alternative on ${siteName}">
+        ${safe(stripeBtnText)}
+      </button>
+    </div>
+    `;
+  }
+
+  function buildSavingTemplate(isAlreadyGreen, saving_message, saving_kg) {
+    return `
+    <div class="saving">
+      <span class="saving-ico" aria-hidden="true">🌱</span>
+      <span class="saving-txt">${safe(saving_message)}</span>
+      <span class="saving-kg">${isAlreadyGreen ? '0.0' : `−${Number(saving_kg).toFixed(1)}`} kg</span>
+    </div>
+    `;
+  }
+
+  function buildCreditsTemplate(isAlreadyGreen, credit_delta) {
+    if (isAlreadyGreen) {
+      return `
+      <div class="credits">
+        <span class="pill pill-pos">${credit_delta > 0 ? "+" : ""}${credit_delta} pts</span>
+        <span class="c-lbl">Sustainability bonus earned!</span>
+      </div>
+      `;
     }
+    return `
+    <div class="credits">
+      <span class="pill pill-neg">${credit_delta > 0 ? "+" : ""}${credit_delta} pts</span>
+      <span class="c-lbl">Switch → <strong class="pill pill-pos">+${Math.abs(credit_delta)} pts</strong></span>
+    </div>
+    `;
+  }
 
-    if (findBtn && targetUrl) {
-      findBtn.onclick = () => {
-        window.open(targetUrl, "_blank", "noopener");
-        removeBanner();
-        escCleanup();
-        onAccept();
-      };
-    }
-
-    // Escape listener cleanup/setup
-    function escHandler(e) { if (e.key === "Escape") { removeBanner(); escCleanup(); onDismiss("keyboard"); } }
-    function escCleanup() { document.removeEventListener("keydown", escHandler); }
-    document.addEventListener("keydown", escHandler);
-
-    // Focus Trap
-    function focusTrap(e) {
-      if (e.key === "Tab") {
-        const focusables = [
-          shadow.getElementById("btn-close"),
-          shadow.getElementById("btn-find"),
-          shadow.getElementById("btn-proceed")
-        ].filter(Boolean);
-        const activeEl = shadow.activeElement;
-        const first = focusables[0];
-        const last = focusables[focusables.length - 1];
-
-        if (e.shiftKey) {
-          if (activeEl === first || !focusables.includes(activeEl)) {
-            last.focus();
-            e.preventDefault();
-          }
-        } else {
-          if (activeEl === last || !focusables.includes(activeEl)) {
-            first.focus();
-            e.preventDefault();
-          }
-        }
-      }
-    }
-    shadow.addEventListener("keydown", focusTrap);
-
-    setTimeout(() => shadow.getElementById("btn-find")?.focus(), 350);
+  function buildFooterButtonsTemplate(isAlreadyGreen) {
+    return `
+    <div class="btns">
+      <button class="btn-pr" id="btn-proceed" style="${isAlreadyGreen ? 'border-color: #1a9e6e; color: #1a9e6e; font-weight: 700;' : ''}">
+        ${isAlreadyGreen ? 'Proceed with purchase ✓' : 'Keep original'}
+      </button>
+    </div>
+    `;
   }
 
   function buildEcommerceCard(result, label, altInfo, originalImage) {
@@ -408,29 +489,11 @@
       usedFallback = false,
     } = result;
 
-    const sevMap = {
-      low:      { color:"#1a9e6e", label:"Low impact",      icon:"🟢" },
-      medium:   { color:"#e6a817", label:"Moderate impact", icon:"🟡" },
-      high:     { color:"#e07b39", label:"High impact",     icon:"🟠" },
-      critical: { color:"#c0392b", label:"Critical impact", icon:"🔴" },
-    };
-    const sev = sevMap[severity] || sevMap.medium;
+    const sev = getSeverityConfig(severity);
 
     const total = co2_kg + alternative_co2_kg + 0.001;
     const pct    = Math.min((co2_kg / total) * 100, 95).toFixed(0);
     const altPct = (100 - Number(pct)).toFixed(0);
-
-    function safe(s) { const d = document.createElement("div"); d.textContent = String(s||""); return d.innerHTML; }
-    function pros(items, color) {
-      return (Array.isArray(items)?items:[items]).slice(0,2).map(p=>
-        `<li style="color:${color};font-size:12px;list-style:none;display:flex;gap:5px;padding:2px 0;line-height:1.4"><span style="flex-shrink:0">✓</span><span>${safe(p)}</span></li>`
-      ).join("");
-    }
-    function cons(items) {
-      return (Array.isArray(items)?items:[items]).slice(0,2).map(p=>
-        `<li style="color:#999;font-size:12px;list-style:none;display:flex;gap:5px;padding:2px 0;line-height:1.4"><span style="flex-shrink:0">✗</span><span>${safe(p)}</span></li>`
-      ).join("");
-    }
 
     const siteName = SITE.charAt(0).toUpperCase() + SITE.slice(1);
     const searchQuery = altInfo?.searchQuery || alternative_name;
@@ -438,7 +501,6 @@
 
     // Resolve stable alternative image and URL for fallback products if search failed
     let altImg = altInfo?.alternativeImage;
-    let altUrl = altInfo?.alternativeUrl;
 
     if (!altImg && alternative_name) {
       const lowerAlt = alternative_name.toLowerCase();
@@ -471,7 +533,6 @@
 
     const isAlreadyGreen = !!(result.is_sustainable_choice || result.isAlreadySustainable || !alternative_name);
     const isDirectLink = !!(altInfo && !altInfo.isSearchLink && altInfo.alternativeUrl);
-    const targetUrl = isDirectLink ? altInfo.alternativeUrl : getSearchUrlForProduct(alternative_name || searchQuery);
 
     const stripeBg = isDirectLink ? "#e8f8f1" : "#f5f6f8";
     const stripeBorder = isDirectLink ? "#d0f0e0" : "#e2e4e8";
@@ -482,25 +543,25 @@
 
     return `
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-.card{background:#fff;border-radius:16px;box-shadow:0 12px 44px rgba(0,0,0,.24),0 2px 8px rgba(0,0,0,.1);overflow:hidden;animation:rise .3s cubic-bezier(.34,1.56,.64,1) both}
-@keyframes rise{from{opacity:0;transform:translateY(18px) scale(.96)}to{opacity:1;transform:none}}
-@media(prefers-reduced-motion:reduce){.card{animation:none}}
-.hd{background:${sev.color};color:#fff;padding:10px 14px;display:flex;align-items:center;gap:8px}
-.hd-lbl{font-size:13px;font-weight:700;flex:1}
-.hd-badge{font-size:10px;font-weight:700;background:rgba(255,255,255,.22);padding:2px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
-.hd-x{background:none;border:none;color:#fff;font-size:18px;cursor:pointer;padding:2px 5px;border-radius:4px;opacity:.8;line-height:1}
-.hd-x:hover{opacity:1;background:rgba(0,0,0,.15)}
-.hd-x:focus-visible{outline:2px solid #fff}
-.analogy{padding:10px 14px;font-size:13px;font-weight:500;color:#1a1a1a;line-height:1.5;border-bottom:1px solid #f0f0f0}
-.fallback{font-size:10px;color:#aaa;font-style:italic;margin-top:4px}
-.grid{display:grid;grid-template-columns:1fr 1fr}
-.col{padding:10px 12px 8px}
-.col-a{border-right:1px solid #f0f0f0}
-.col-b{background:#f6fdf9}
-.tag{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}
-.tag-a{color:${sev.color}}
-.tag-b{color:#1a9e6e}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+.card { background: #fff; border-radius: 16px; box-shadow: 0 12px 44px rgba(0,0,0,.24), 0 2px 8px rgba(0,0,0,.1); overflow: hidden; animation: rise .3s cubic-bezier(.34,1.56,.64,1) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(18px) scale(.96); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .card { animation: none; } }
+.hd { background: ${sev.color}; color: #fff; padding: 10px 14px; display: flex; align-items: center; gap: 8px; }
+.hd-lbl { font-size: 13px; font-weight: 700; flex: 1; }
+.hd-badge { font-size: 10px; font-weight: 700; background: rgba(255,255,255,.22); padding: 2px 8px; border-radius: 20px; text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; }
+.hd-x { background: none; border: none; color: #fff; font-size: 18px; cursor: pointer; padding: 2px 5px; border-radius: 4px; opacity: .8; line-height: 1; }
+.hd-x:hover { opacity: 1; background: rgba(0,0,0,.15); }
+.hd-x:focus-visible { outline: 2px solid #fff; }
+.analogy { padding: 10px 14px; font-size: 13px; font-weight: 500; color: #1a1a1a; line-height: 1.5; border-bottom: 1px solid #f0f0f0; }
+.fallback { font-size: 10px; color: #aaa; font-style: italic; margin-top: 4px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; }
+.col { padding: 10px 12px 8px; }
+.col-a { border-right: 1px solid #f0f0f0; }
+.col-b { background: #f6fdf9; }
+.tag { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 5px; }
+.tag-a { color: ${sev.color}; }
+.tag-b { color: #1a9e6e; }
 .img-container {
   width: 100%;
   height: 90px;
@@ -519,165 +580,62 @@
   max-height: 100%;
   object-fit: contain;
 }
-.col-name{font-size:12px;font-weight:600;color:#1a1a1a;margin-bottom:5px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;min-height:32px}
-.bar-bg{height:5px;border-radius:3px;background:#efefef;overflow:hidden;margin-bottom:3px}
-.bar-fill{height:100%;border-radius:3px}
-.bar-a{background:${sev.color};width:${pct}%}
-.bar-b{background:#1a9e6e;width:${altPct}%}
-.co2n{font-size:16px;font-weight:700}
-.co2n-a{color:${sev.color}}
-.co2n-b{color:#1a9e6e}
-.co2u{font-size:10px;color:#888;font-weight:400}
-ul{padding:0;margin-top:7px;list-style:none}
+.col-name { font-size: 12px; font-weight: 600; color: #1a1a1a; margin-bottom: 5px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; min-height: 32px; }
+.bar-bg { height: 5px; border-radius: 3px; background: #efefef; overflow: hidden; margin-bottom: 3px; }
+.bar-fill { height: 100%; border-radius: 3px; }
+.bar-a { background: ${sev.color}; width: ${pct}%; }
+.bar-b { background: #1a9e6e; width: ${altPct}%; }
+.co2n { font-size: 16px; font-weight: 700; }
+.co2n-a { color: ${sev.color}; }
+.co2n-b { color: #1a9e6e; }
+.co2u { font-size: 10px; color: #888; font-weight: 400; }
+ul { padding: 0; margin-top: 7px; list-style: none; }
 
 /* Site search strip */
-.site-strip{background:${stripeBg};border-top:1px solid ${stripeBorder};padding:10px 14px;display:flex;align-items:center;gap:10px}
-.site-strip-icon{font-size:18px;flex-shrink:0}
-.site-strip-body{flex:1;min-width:0}
-.site-strip-title{font-size:12px;font-weight:700;color:${stripeTitleColor};margin-bottom:2px}
-.site-strip-query{font-size:11px;color:#555;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.btn-find{background:#1a9e6e;color:#fff;border:none;border-radius:8px;padding:8px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:background .15s}
-.btn-find:hover{background:#148a5e}
-.btn-find:focus-visible{outline:2px solid #1a9e6e;outline-offset:2px}
+.site-strip { background: ${stripeBg}; border-top: 1px solid ${stripeBorder}; padding: 10px 14px; display: flex; align-items: center; gap: 10px; }
+.site-strip-icon { font-size: 18px; flex-shrink: 0; }
+.site-strip-body { flex: 1; min-width: 0; }
+.site-strip-title { font-size: 12px; font-weight: 700; color: ${stripeTitleColor}; margin-bottom: 2px; }
+.site-strip-query { font-size: 11px; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-find { background: #1a9e6e; color: #fff; border: none; border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; flex-shrink: 0; transition: background .15s; }
+.btn-find:hover { background: #148a5e; }
+.btn-find:focus-visible { outline: 2px solid #1a9e6e; outline-offset: 2px; }
 
-.saving{background:#e8f8f1;padding:8px 14px;display:flex;align-items:center;gap:8px;border-top:1px solid #d0f0e0}
-.saving-ico{font-size:15px;flex-shrink:0}
-.saving-txt{font-size:12px;font-weight:600;color:#1a5c3e;flex:1;line-height:1.4}
-.saving-kg{font-size:13px;font-weight:700;color:#1a9e6e;white-space:nowrap}
-.credits{display:flex;gap:6px;padding:8px 12px;border-top:1px solid #f0f0f0;align-items:center}
-.pill{font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px}
-.pill-neg{background:#fdecea;color:#c0392b}
-.pill-pos{background:#e8f8f1;color:#1a9e6e}
-.c-lbl{font-size:11px;color:#888;flex:1}
-.btns{display:flex;gap:8px;padding:0 12px 12px}
-.btn-pr{flex:1;background:none;border:1px solid #e0e0e0;border-radius:10px;padding:10px;font-size:12px;color:#888;cursor:pointer;transition:background .15s;text-align:center}
-.btn-pr:hover{background:#f5f5f5}
-.btn-pr:focus-visible{outline:2px solid #aaa;outline-offset:2px}
-.brand{display:flex;justify-content:center;padding:0 0 8px;font-size:10px;font-weight:700;color:#ccc;letter-spacing:.1em}
+.saving { background: #e8f8f1; padding: 8px 14px; display: flex; align-items: center; gap: 8px; border-top: 1px solid #d0f0e0; }
+.saving-ico { font-size: 15px; flex-shrink: 0; }
+.saving-txt { font-size: 12px; font-weight: 600; color: #1a5c3e; flex: 1; line-height: 1.4; }
+.saving-kg { font-size: 13px; font-weight: 700; color: #1a9e6e; white-space: nowrap; }
+.credits { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid #f0f0f0; align-items: center; }
+.pill { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 20px; }
+.pill-neg { background: #fdecea; color: #c0392b; }
+.pill-pos { background: #e8f8f1; color: #1a9e6e; }
+.c-lbl { font-size: 11px; color: #888; flex: 1; }
+.btns { display: flex; gap: 8px; padding: 0 12px 12px; }
+.btn-pr { flex: 1; background: none; border: 1px solid #e0e0e0; border-radius: 10px; padding: 10px; font-size: 12px; color: #888; cursor: pointer; transition: background .15s; text-align: center; }
+.btn-pr:hover { background: #f5f5f5; }
+.btn-pr:focus-visible { outline: 2px solid #aaa; outline-offset: 2px; }
+.brand { display: flex; justify-content: center; padding: 0 0 8px; font-size: 10px; font-weight: 700; color: #ccc; letter-spacing: .1em; }
 </style>
 
-<div class="card">
-  <div class="hd">
-    <span style="font-size:16px;flex-shrink:0" aria-hidden="true">🌿</span>
-    <span class="hd-lbl">Carbon Comparison</span>
-    <span class="hd-badge">${sev.icon} ${safe(sev.label)}</span>
-    <button class="hd-x" id="btn-close" aria-label="Dismiss">✕</button>
-  </div>
-
-  <div class="analogy">
-    ${safe(analogy)}
-    ${usedFallback ? '<p class="fallback">⚠ Offline estimate — add Gemini API key for live AI analysis</p>' : ''}
-  </div>
-
-  ${isAlreadyGreen ? `
-  <div style="padding: 18px 14px; text-align: center; background: #e8f8f1; border-top: 1px solid #d0f0e0; border-bottom: 1px solid #d0f0e0; display: flex; flex-direction: column; align-items: center; gap: 8px;">
-    <span style="font-size: 32px;" aria-hidden="true">🏆</span>
-    <h3 style="color: #1a5c3e; font-size: 15px; margin: 0; font-weight: 700;">Sustainable Choice!</h3>
-    <p style="color: #27ae60; font-size: 13px; font-weight: 600; line-height: 1.4; max-width: 320px;">
-      This product is already eco-friendly. No greener alternative needed!
-    </p>
-  </div>
-  ` : `
-  <div class="grid">
-    <div class="col col-a">
-      <div class="tag tag-a">Your choice</div>
-      ${originalImage ? `
-      <div class="img-container">
-        <img src="${safe(originalImage)}" alt="Original product" class="prod-img" />
-      </div>` : ''}
-      <div class="col-name">${shortLabel}</div>
-      <div class="bar-bg"><div class="bar-fill bar-a"></div></div>
-      <span class="co2n co2n-a">${Number(co2_kg).toFixed(1)}</span><span class="co2u"> kg CO₂e</span>
-      <ul>${pros(current_pros, sev.color)}${cons(current_cons)}</ul>
-    </div>
-    <div class="col col-b">
-      <div class="tag tag-b">Greener choice ✓</div>
-      ${altImg ? `
-      <div class="img-container">
-        <img src="${safe(altImg)}" alt="Eco alternative" class="prod-img" />
-      </div>` : ''}
-      <div class="col-name">${safe(alternative_name)}</div>
-      <div class="bar-bg"><div class="bar-fill bar-b"></div></div>
-      <span class="co2n co2n-b">${Number(alternative_co2_kg).toFixed(1)}</span><span class="co2u"> kg CO₂e</span>
-      <ul>${pros(alternative_pros, "#1a9e6e")}${cons(alternative_cons)}</ul>
-    </div>
-  </div>
-  `}
-
-  <!-- Site search/product strip — links to eco alternatives ON the same website -->
-  ${!isAlreadyGreen ? `
-  <div class="site-strip">
-    <span class="site-strip-icon" aria-hidden="true">${isDirectLink ? '🌿' : '🔍'}</span>
-    <div class="site-strip-body">
-      <div class="site-strip-title">${safe(stripeTitle)}</div>
-      <div class="site-strip-query">${safe(stripeQuery)}</div>
-    </div>
-    <button class="btn-find" id="btn-find" aria-label="${isDirectLink ? 'View' : 'Search'} green alternative">
-      ${safe(stripeBtnText)}
-    </button>
-  </div>
-  ` : ''}
-
-  <div class="saving">
-    <span class="saving-ico" aria-hidden="true">🌱</span>
-    <span class="saving-txt">${safe(saving_message)}</span>
-    <span class="saving-kg">${isAlreadyGreen ? '0.0' : `−${Number(saving_kg).toFixed(1)}`} kg</span>
-  </div>
-
-  <div class="credits">
-    ${isAlreadyGreen ? `
-    <span class="pill pill-pos">${credit_delta > 0 ? "+" : ""}${credit_delta} pts</span>
-    <span class="c-lbl">Sustainability bonus earned!</span>
-    ` : `
-    <span class="pill pill-neg">${credit_delta > 0 ? "+" : ""}${credit_delta} pts</span>
-    <span class="c-lbl">Switch → <strong class="pill pill-pos">+${Math.abs(credit_delta)} pts</strong></span>
-    `}
-  </div>
-
-  <div class="btns">
-    <button class="btn-pr" id="btn-proceed" style="${isAlreadyGreen ? 'border-color: #1a9e6e; color: #1a9e6e; font-weight: 700;' : ''}">
-      ${isAlreadyGreen ? 'Proceed with purchase ✓' : 'Keep original'}
-    </button>
-  </div>
-
+<div class="card" role="alertdialog" aria-modal="true" aria-labelledby="card-title" aria-describedby="card-analogy">
+  ${buildHeaderTemplate(sev)}
+  ${buildAnalogyTemplate(analogy, usedFallback)}
+  ${buildGridTemplate({ isAlreadyGreen, originalImage, altImg, co2_kg, alternative_co2_kg, pct, altPct, shortLabel, alternative_name, current_pros, current_cons, alternative_pros, alternative_cons, sev })}
+  ${buildSearchStripTemplate(isAlreadyGreen, isDirectLink, stripeTitle, stripeQuery, stripeBtnText, siteName)}
+  ${buildSavingTemplate(isAlreadyGreen, saving_message, saving_kg)}
+  ${buildCreditsTemplate(isAlreadyGreen, credit_delta)}
+  ${buildFooterButtonsTemplate(isAlreadyGreen)}
   <div class="brand">ECOSCORE · CARBON AWARENESS</div>
 </div>`;
   }
 
   // ── Main analysis ──────────────────────────────────────────────────────────
 
-  function showComingSoonBanner(siteName) {
-    removeBanner();
-    const host = document.createElement("div");
-    host.id = BANNER_ID;
-    host.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:430px;width:calc(100vw - 32px)";
-    host.setAttribute("role", "alertdialog");
-    host.setAttribute("aria-modal", "true");
-
-    const shadow = host.attachShadow({ mode: "open" });
-    shadow.innerHTML = window.buildComingSoonCardHTML(siteName);
-    document.body.appendChild(host);
-
-    const closeBanner = () => {
-      removeBanner();
-      active = false;
-      document.removeEventListener("keydown", escHandler);
-    };
-
-    shadow.getElementById("btn-close").onclick   = closeBanner;
-    shadow.getElementById("btn-proceed").onclick = closeBanner;
-
-    function escHandler(e) { if (e.key === "Escape") { closeBanner(); } }
-    document.addEventListener("keydown", escHandler);
-
-    setTimeout(() => shadow.getElementById("btn-proceed")?.focus(), 350);
-  }
-
   async function analyze() {
     if (active) return;
     active = true;
     const sel   = SELECTORS[SITE];
-    const titleEl = q(sel.title);
+    const titleEl = queryFirst(sel.title);
     const title = titleEl?.textContent?.trim() || "";
     if (title.length < 3) { active = false; return; }
 
@@ -686,12 +644,12 @@ ul{padding:0;margin-top:7px;list-style:none}
     lastKey = key;
 
     if (SITE !== "amazon") {
-      showComingSoonBanner(SITE === "flipkart" ? "Flipkart" : SITE === "myntra" ? "Myntra" : SITE);
+      window.EcoScoreUI.showComingSoonBanner(SITE === "flipkart" ? "Flipkart" : SITE === "myntra" ? "Myntra" : SITE);
       return;
     }
 
-    const deliveryTxt = q(sel.delivery)?.textContent?.trim() || "";
-    const catTxt      = q(sel.category)?.textContent?.trim() || "";
+    const deliveryTxt = queryFirst(sel.delivery)?.textContent?.trim() || "";
+    const catTxt      = queryFirst(sel.category)?.textContent?.trim() || "";
     const { cat, sev, score } = classify(title, catTxt);
     const express = isExpress(deliveryTxt);
     const { user_location } = await chrome.storage.local.get(["user_location"]);
@@ -775,21 +733,53 @@ ul{padding:0;margin-top:7px;list-style:none}
 
       active = true;
       const label = `${title.slice(0, 50)}${title.length > 50 ? "…" : ""} · ${SITE}`;
+      const cardHtml = buildEcommerceCard(result, label, altInfo, originalImage);
 
-      showBanner(
-        result, label, altInfo,
-        () => {
+      // Resolve stable targetUrl for action button click
+      let targetUrl = altInfo?.alternativeUrl;
+      if (!targetUrl && result.alternative_name) {
+        targetUrl = getSearchUrlForProduct(result.alternative_name);
+      }
+      if (!targetUrl) {
+        targetUrl = altInfo?.searchUrl;
+      }
+
+      window.EcoScoreUI.showBanner(cardHtml, {
+        onAccept: () => {
+          if (targetUrl) {
+            window.open(targetUrl, "_blank", "noopener");
+          }
           active = false;
           const targetName = altInfo?.alternativeName || altInfo?.searchQuery || "eco alternative";
-          chrome.runtime.sendMessage({ type: "RECORD_ACTION", payload: { label: `Swapped to: ${targetName.slice(0, 50)}`, site: SITE, creditDelta: Math.abs(result.credit_delta), co2Kg: result.alternative_co2_kg, analogy: result.analogy, category: "ecommerce" } });
+          chrome.runtime.sendMessage({
+            type: "RECORD_ACTION",
+            payload: {
+              label: `Swapped to: ${targetName.slice(0, 50)}`,
+              site: SITE,
+              creditDelta: Math.abs(result.credit_delta),
+              co2Kg: result.alternative_co2_kg,
+              analogy: result.analogy,
+              category: "ecommerce"
+            }
+          });
         },
-        (reason) => {
+        onDismiss: (reason) => {
           active = false;
           if (reason === "proceeded") {
-            chrome.runtime.sendMessage({ type: "RECORD_ACTION", payload: { label: `Bought: ${title.slice(0,50)}`, site: SITE, creditDelta: result.credit_delta, co2Kg: result.co2_kg, analogy: result.analogy, category: "ecommerce" } });
+            chrome.runtime.sendMessage({
+              type: "RECORD_ACTION",
+              payload: {
+                label: `Bought: ${title.slice(0, 50)}`,
+                site: SITE,
+                creditDelta: result.credit_delta,
+                co2Kg: result.co2_kg,
+                analogy: result.analogy,
+                category: "ecommerce"
+              }
+            });
           }
         }
-      );
+      });
     });
   }
 
@@ -803,10 +793,10 @@ ul{padding:0;margin-top:7px;list-style:none}
   }
 
   if (isProductPage()) {
-    setTimeout(analyze, 2500);
+    setTimeout(analyze, INITIAL_DELAY_MS);
     document.addEventListener("click", (e) => {
       for (const s of SELECTORS[SITE].addCart) {
-        try { if (e.target.closest(s)) { setTimeout(analyze, 300); break; } } catch {}
+        try { if (e.target.closest(s)) { setTimeout(analyze, CLICK_DELAY_MS); break; } } catch {}
       }
     }, true);
   }
@@ -815,7 +805,7 @@ ul{padding:0;margin-top:7px;list-style:none}
   const ecommerceObserver = new MutationObserver(() => {
     if (location.href !== lastURL) {
       lastURL = location.href; lastKey = null; active = false;
-      if (isProductPage()) setTimeout(analyze, 2000);
+      if (isProductPage()) setTimeout(analyze, DEBOUNCE_DELAY_MS);
     }
   });
 

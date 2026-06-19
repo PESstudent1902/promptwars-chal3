@@ -1,12 +1,31 @@
 /**
- * card-ui.js — Shared comparison card HTML builder
+ * card-ui.js — Shared comparison card UI and banner controller
  * Injected before all content scripts via manifest.
- * Sets window.buildCardHTML used by food, cab, travel content scripts.
- * Ecommerce has its own buildEcommerceCard with site-search strip.
+ * Exposes window.EcoScoreUI namespace.
  */
 
 (function () {
   "use strict";
+
+  // ─── Shared Styling ──────────────────────────────────────────────────────────
+  const SHARED_CSS = `
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    .card { background: #fff; border-radius: 16px; box-shadow: 0 12px 44px rgba(0,0,0,.24), 0 2px 8px rgba(0,0,0,.1); overflow: hidden; animation: rise .3s cubic-bezier(.34,1.56,.64,1) both; }
+    @keyframes rise { from { opacity: 0; transform: translateY(18px) scale(.96); } to { opacity: 1; transform: none; } }
+    @media (prefers-reduced-motion: reduce) { .card { animation: none; } }
+    .hd { color: #fff; padding: 10px 14px; display: flex; align-items: center; gap: 8px; }
+    .hd-lbl { font-size: 13px; font-weight: 700; flex: 1; letter-spacing: .02em; }
+    .hd-badge { font-size: 10px; font-weight: 700; background: rgba(255,255,255,.22); padding: 2px 8px; border-radius: 20px; text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; }
+    .hd-x { background: none; border: none; color: #fff; font-size: 18px; cursor: pointer; padding: 2px 5px; border-radius: 4px; line-height: 1; opacity: .8; flex-shrink: 0; }
+    .hd-x:hover { opacity: 1; background: rgba(0,0,0,.15); }
+    .hd-x:focus-visible { outline: 2px solid #fff; }
+    .brand { display: flex; justify-content: center; padding: 0 0 8px; font-size: 10px; font-weight: 700; color: #ccc; letter-spacing: .1em; }
+    .btn-pr { background: none; border: 1px solid #e0e0e0; border-radius: 10px; padding: 10px; font-size: 12px; color: #888; cursor: pointer; transition: background .15s; text-align: center; }
+    .btn-pr:hover { background: #f5f5f5; }
+    .btn-pr:focus-visible { outline: 2px solid #aaa; outline-offset: 2px; }
+  `;
+
+  // ─── HTML Builders ───────────────────────────────────────────────────────────
 
   window.buildCardHTML = function buildCardHTML(result, label) {
     const {
@@ -21,10 +40,10 @@
     } = result;
 
     const sevMap = {
-      low:      { color:"#1a9e6e", label:"Low impact",      icon:"🟢" },
-      medium:   { color:"#e6a817", label:"Moderate impact", icon:"🟡" },
-      high:     { color:"#e07b39", label:"High impact",     icon:"🟠" },
-      critical: { color:"#c0392b", label:"Critical impact", icon:"🔴" },
+      low:      { color: "#1a9e6e", label: "Low impact",      icon: "🟢" },
+      medium:   { color: "#e6a817", label: "Moderate impact", icon: "🟡" },
+      high:     { color: "#e07b39", label: "High impact",     icon: "🟠" },
+      critical: { color: "#c0392b", label: "Critical impact", icon: "🔴" },
     };
     const sev = sevMap[severity] || sevMap.medium;
 
@@ -57,63 +76,52 @@
 
     return `
 <style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  .card{background:#fff;border-radius:16px;box-shadow:0 12px 44px rgba(0,0,0,.24),0 2px 8px rgba(0,0,0,.1);overflow:hidden;animation:rise .3s cubic-bezier(.34,1.56,.64,1) both}
-  @keyframes rise{from{opacity:0;transform:translateY(18px) scale(.96)}to{opacity:1;transform:none}}
-  @media(prefers-reduced-motion:reduce){.card{animation:none}}
-  .hd{background:${sev.color};color:#fff;padding:10px 14px;display:flex;align-items:center;gap:8px}
-  .hd-lbl{font-size:13px;font-weight:700;flex:1;letter-spacing:.02em}
-  .hd-badge{font-size:10px;font-weight:700;background:rgba(255,255,255,.22);padding:2px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
-  .hd-x{background:none;border:none;color:#fff;font-size:18px;cursor:pointer;padding:2px 5px;border-radius:4px;line-height:1;opacity:.8;flex-shrink:0}
-  .hd-x:hover{opacity:1;background:rgba(0,0,0,.15)}
-  .hd-x:focus-visible{outline:2px solid #fff}
-  .analogy{padding:10px 14px;font-size:13px;font-weight:500;color:#1a1a1a;line-height:1.5;border-bottom:1px solid #f0f0f0}
-  .fallback{font-size:10px;color:#aaa;font-style:italic;margin-top:4px}
-  .grid{display:grid;grid-template-columns:1fr 1fr}
-  .col{padding:10px 12px 8px}
-  .col-a{border-right:1px solid #f0f0f0}
-  .col-b{background:#f6fdf9}
-  .tag{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}
-  .tag-a{color:${sev.color}}
-  .tag-b{color:#1a9e6e}
-  .col-name{font-size:12px;font-weight:600;color:#1a1a1a;margin-bottom:5px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-  .bar-bg{height:5px;border-radius:3px;background:#efefef;overflow:hidden;margin-bottom:3px}
-  .bar-fill{height:100%;border-radius:3px}
-  .bar-a{background:${sev.color};width:${pct}%}
-  .bar-b{background:#1a9e6e;width:${altPct}%}
-  .co2n{font-size:16px;font-weight:700}
-  .co2n-a{color:${sev.color}}
-  .co2n-b{color:#1a9e6e}
-  .co2u{font-size:10px;color:#888;font-weight:400}
-  ul{padding:0;margin-top:7px;list-style:none}
-  .saving{background:#e8f8f1;padding:8px 14px;display:flex;align-items:center;gap:8px;border-top:1px solid #d0f0e0}
-  .saving-ico{font-size:15px;flex-shrink:0}
-  .saving-txt{font-size:12px;font-weight:600;color:#1a5c3e;flex:1;line-height:1.4}
-  .saving-kg{font-size:13px;font-weight:700;color:#1a9e6e;white-space:nowrap;flex-shrink:0}
-  .credits{display:flex;gap:6px;padding:8px 12px;border-top:1px solid #f0f0f0;align-items:center}
-  .pill{font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px}
-  .pill-neg{background:#fdecea;color:#c0392b}
-  .pill-pos{background:#e8f8f1;color:#1a9e6e}
-  .c-lbl{font-size:11px;color:#888;flex:1}
-  .btns{display:flex;gap:8px;padding:0 12px 12px}
-  .btn-sw{flex:1;background:#1a9e6e;color:#fff;border:none;border-radius:10px;padding:10px 10px;font-size:13px;font-weight:700;cursor:pointer;line-height:1.3;text-align:center;transition:background .15s}
-  .btn-sw:hover{background:#148a5e}
-  .btn-sw:focus-visible{outline:2px solid #1a9e6e;outline-offset:2px}
-  .btn-pr{flex:1;background:none;border:1px solid #e0e0e0;border-radius:10px;padding:10px 10px;font-size:12px;color:#888;cursor:pointer;line-height:1.3;text-align:center;transition:background .15s}
-  .btn-pr:hover{background:#f5f5f5}
-  .btn-pr:focus-visible{outline:2px solid #aaa;outline-offset:2px}
-  .brand{display:flex;justify-content:center;padding:0 0 8px;font-size:10px;font-weight:700;color:#ccc;letter-spacing:.1em}
+  ${SHARED_CSS}
+  .hd { background: ${sev.color}; }
+  .analogy { padding: 10px 14px; font-size: 13px; font-weight: 500; color: #1a1a1a; line-height: 1.5; border-bottom: 1px solid #f0f0f0; }
+  .fallback { font-size: 10px; color: #aaa; font-style: italic; margin-top: 4px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; }
+  .col { padding: 10px 12px 8px; }
+  .col-a { border-right: 1px solid #f0f0f0; }
+  .col-b { background: #f6fdf9; }
+  .tag { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 3px; }
+  .tag-a { color: ${sev.color}; }
+  .tag-b { color: #1a9e6e; }
+  .col-name { font-size: 12px; font-weight: 600; color: #1a1a1a; margin-bottom: 5px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .bar-bg { height: 5px; border-radius: 3px; background: #efefef; overflow: hidden; margin-bottom: 3px; }
+  .bar-fill { height: 100%; border-radius: 3px; }
+  .bar-a { background: ${sev.color}; width: ${pct}%; }
+  .bar-b { background: #1a9e6e; width: ${altPct}%; }
+  .co2n { font-size: 16px; font-weight: 700; }
+  .co2n-a { color: ${sev.color}; }
+  .co2n-b { color: #1a9e6e; }
+  .co2u { font-size: 10px; color: #888; font-weight: 400; }
+  ul { padding: 0; margin-top: 7px; list-style: none; }
+  .saving { background: #e8f8f1; padding: 8px 14px; display: flex; align-items: center; gap: 8px; border-top: 1px solid #d0f0e0; }
+  .saving-ico { font-size: 15px; flex-shrink: 0; }
+  .saving-txt { font-size: 12px; font-weight: 600; color: #1a5c3e; flex: 1; line-height: 1.4; }
+  .saving-kg { font-size: 13px; font-weight: 700; color: #1a9e6e; white-space: nowrap; flex-shrink: 0; }
+  .credits { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid #f0f0f0; align-items: center; }
+  .pill { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 20px; }
+  .pill-neg { background: #fdecea; color: #c0392b; }
+  .pill-pos { background: #e8f8f1; color: #1a9e6e; }
+  .c-lbl { font-size: 11px; color: #888; flex: 1; }
+  .btns { display: flex; gap: 8px; padding: 0 12px 12px; }
+  .btn-sw { flex: 1; background: #1a9e6e; color: #fff; border: none; border-radius: 10px; padding: 10px 10px; font-size: 13px; font-weight: 700; cursor: pointer; line-height: 1.3; text-align: center; transition: background .15s; }
+  .btn-sw:hover { background: #148a5e; }
+  .btn-sw:focus-visible { outline: 2px solid #1a9e6e; outline-offset: 2px; }
+  .btn-pr { flex: 1; }
 </style>
 
-<div class="card" role="alertdialog" aria-modal="true">
+<div class="card" role="alertdialog" aria-modal="true" aria-labelledby="card-title" aria-describedby="card-analogy">
   <div class="hd">
     <span style="font-size:16px;flex-shrink:0" aria-hidden="true">🌿</span>
-    <span class="hd-lbl">Carbon Comparison</span>
+    <h2 class="hd-lbl" id="card-title">Carbon Comparison</h2>
     <span class="hd-badge">${sev.icon} ${safe(sev.label)}</span>
     <button class="hd-x" id="btn-close" aria-label="Dismiss">✕</button>
   </div>
 
-  <div class="analogy">
+  <div class="analogy" id="card-analogy">
     ${safe(analogy)}
     ${usedFallback ? '<p class="fallback">⚠ Offline estimate — add Gemini API key for live AI analysis</p>' : ''}
   </div>
@@ -122,7 +130,7 @@
     <div class="col col-a">
       <div class="tag tag-a">Your choice</div>
       <div class="col-name">${shortLabel}</div>
-      <div class="bar-bg"><div class="bar-fill bar-a"></div></div>
+      <div class="bar-bg" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Your choice carbon emission ratio"><div class="bar-fill bar-a"></div></div>
       <span class="co2n co2n-a">${Number(co2_kg).toFixed(1)}</span>
       <span class="co2u"> kg CO₂e</span>
       <ul>${prosLi(current_pros, sev.color)}${consLi(current_cons)}</ul>
@@ -130,7 +138,7 @@
     <div class="col col-b">
       <div class="tag tag-b">Greener choice ✓</div>
       <div class="col-name">${safe(alternative_name)}</div>
-      <div class="bar-bg"><div class="bar-fill bar-b"></div></div>
+      <div class="bar-bg" role="progressbar" aria-valuenow="${altPct}" aria-valuemin="0" aria-valuemax="100" aria-label="Greener choice carbon emission ratio"><div class="bar-fill bar-b"></div></div>
       <span class="co2n co2n-b">${Number(alternative_co2_kg).toFixed(1)}</span>
       <span class="co2u"> kg CO₂e</span>
       <ul>${prosLi(alternative_pros, "#1a9e6e")}${consLi(alternative_cons)}</ul>
@@ -161,40 +169,131 @@
     const capitalizedSite = siteName.charAt(0).toUpperCase() + siteName.slice(1);
     return `
 <style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  .card{background:#fff;border-radius:16px;box-shadow:0 12px 44px rgba(0,0,0,.24),0 2px 8px rgba(0,0,0,.1);overflow:hidden;animation:rise .3s cubic-bezier(.34,1.56,.64,1) both}
-  @keyframes rise{from{opacity:0;transform:translateY(18px) scale(.96)}to{opacity:1;transform:none}}
-  @media(prefers-reduced-motion:reduce){.card{animation:none}}
-  .hd{background:#1a9e6e;color:#fff;padding:10px 14px;display:flex;align-items:center;gap:8px}
-  .hd-lbl{font-size:13px;font-weight:700;flex:1;letter-spacing:.02em}
-  .hd-x{background:none;border:none;color:#fff;font-size:18px;cursor:pointer;padding:2px 5px;border-radius:4px;line-height:1;opacity:.8;flex-shrink:0}
-  .hd-x:hover{opacity:1;background:rgba(0,0,0,.15)}
-  .hd-x:focus-visible{outline:2px solid #fff}
-  .body{padding:20px 16px;text-align:center}
-  .icon{font-size:32px;margin-bottom:12px}
-  .title{font-size:16px;font-weight:700;color:#1a1a1a;margin-bottom:8px}
-  .desc{font-size:13px;color:#666;line-height:1.5;margin-bottom:16px}
-  .btn-pr{width:100%;background:#1a9e6e;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;font-weight:700;cursor:pointer;transition:background .15s}
-  .btn-pr:hover{background:#148a5e}
-  .brand{display:flex;justify-content:center;padding:0 0 8px;font-size:10px;font-weight:700;color:#ccc;letter-spacing:.1em}
+  ${SHARED_CSS}
+  .hd { background: #1a9e6e; }
+  .body { padding: 20px 16px; text-align: center; }
+  .icon { font-size: 32px; margin-bottom: 12px; }
+  .title { font-size: 16px; font-weight: 700; color: #1a1a1a; margin-bottom: 8px; }
+  .desc { font-size: 13px; color: #666; line-height: 1.5; margin-bottom: 16px; }
+  .btn-pr { width: 100%; background: #1a9e6e; color: #fff; border: none; border-radius: 10px; padding: 10px; font-size: 13px; font-weight: 700; cursor: pointer; transition: background .15s; }
+  .btn-pr:hover { background: #148a5e; }
 </style>
 
-<div class="card" role="alertdialog" aria-modal="true">
+<div class="card" role="alertdialog" aria-modal="true" aria-labelledby="card-title" aria-describedby="card-desc">
   <div class="hd">
     <span style="font-size:16px;flex-shrink:0" aria-hidden="true">🌿</span>
-    <span class="hd-lbl">EcoScore</span>
+    <h2 class="hd-lbl" id="card-title">EcoScore</h2>
     <button class="hd-x" id="btn-close" aria-label="Dismiss">✕</button>
   </div>
 
   <div class="body">
-    <div class="icon">🚀</div>
-    <div class="title">${capitalizedSite} Carbon Analysis</div>
-    <p class="desc">EcoScore carbon footprint tracking and sustainable alternative suggestions for ${capitalizedSite} are coming soon!</p>
+    <div class="icon" aria-hidden="true">🚀</div>
+    <h3 class="title">${capitalizedSite} Carbon Analysis</h3>
+    <p class="desc" id="card-desc">EcoScore carbon footprint tracking and sustainable alternative suggestions for ${capitalizedSite} are coming soon!</p>
     <button class="btn-pr" id="btn-proceed">Got it</button>
   </div>
 
   <div class="brand">ECOSCORE · CARBON AWARENESS</div>
 </div>`;
   };
+
+  // ─── Generic Banner Management ────────────────────────────────────────────────
+
+  const BANNER_ID = "ecoscore-root";
+
+  function removeBanner() {
+    document.getElementById(BANNER_ID)?.remove();
+  }
+
+  function showBanner(html, callbacks = {}) {
+    removeBanner();
+    const host = document.createElement("div");
+    host.id = BANNER_ID;
+    host.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:430px;width:calc(100vw - 32px)";
+    host.setAttribute("role", "alertdialog");
+    host.setAttribute("aria-modal", "true");
+
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = html;
+    document.body.appendChild(host);
+
+    const closeBtn = shadow.getElementById("btn-close");
+    const proceedBtn = shadow.getElementById("btn-proceed");
+    const actionBtn = shadow.getElementById("btn-switch") || shadow.getElementById("btn-find");
+
+    const handleDismiss = (reason) => {
+      removeBanner();
+      escCleanup();
+      if (callbacks.onDismiss) callbacks.onDismiss(reason);
+    };
+
+    if (closeBtn) {
+      closeBtn.onclick = () => handleDismiss("dismissed");
+    }
+    if (proceedBtn) {
+      proceedBtn.onclick = () => handleDismiss("proceeded");
+    }
+    if (actionBtn) {
+      actionBtn.onclick = () => {
+        removeBanner();
+        escCleanup();
+        if (callbacks.onAccept) callbacks.onAccept();
+      };
+    }
+
+    // Escape listener
+    function escHandler(e) {
+      if (e.key === "Escape") {
+        handleDismiss("keyboard");
+      }
+    }
+    function escCleanup() {
+      document.removeEventListener("keydown", escHandler);
+    }
+    document.addEventListener("keydown", escHandler);
+
+    // Focus Trap
+    function focusTrap(e) {
+      if (e.key === "Tab") {
+        const focusables = [closeBtn, actionBtn, proceedBtn].filter(Boolean);
+        if (focusables.length === 0) return;
+        const activeEl = shadow.activeElement;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+
+        if (e.shiftKey) {
+          if (activeEl === first || !focusables.includes(activeEl)) {
+            last.focus();
+            e.preventDefault();
+          }
+        } else {
+          if (activeEl === last || !focusables.includes(activeEl)) {
+            first.focus();
+            e.preventDefault();
+          }
+        }
+      }
+    }
+    shadow.addEventListener("keydown", focusTrap);
+
+    // Initial focus
+    const initialFocus = actionBtn || proceedBtn || closeBtn;
+    if (initialFocus) {
+      setTimeout(() => initialFocus.focus(), 350);
+    }
+  }
+
+  function showComingSoonBanner(siteName) {
+    const html = window.buildComingSoonCardHTML(siteName);
+    showBanner(html);
+  }
+
+  // ─── Export & Freeze Namespace ───────────────────────────────────────────────
+
+  window.EcoScoreUI = Object.freeze({
+    showBanner,
+    showComingSoonBanner,
+    removeBanner
+  });
 
 })();

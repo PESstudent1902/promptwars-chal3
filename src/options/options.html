@@ -117,14 +117,14 @@
           <li>No browsing data, order details, or personal info is ever sent to our servers</li>
           <li>Carbon analysis prompts sent to Gemini contain only item names and categories — not your identity</li>
         </ul>
-        <div class="btn-row" style="margin-top: 16px;">
+        <div class="btn-row btn-row-spaced">
           <button id="reset-data-btn" class="btn-danger">Reset all data</button>
         </div>
       </section>
 
       <!-- Version -->
       <footer class="page-footer">
-        <p>EcoScore v1.2.0 · Built for PromptWars · <a href="../../PRIVACY_POLICY.md" target="_blank" style="color: #666; text-decoration: underline;">Privacy Policy</a> · Carbon awareness, not carbon tracking.</p>
+        <p>EcoScore v1.2.0 · Built for PromptWars · <a href="../../PRIVACY_POLICY.md" target="_blank" class="footer-link-underline">Privacy Policy</a> · Carbon awareness, not carbon tracking.</p>
       </footer>
 
     </main>
@@ -134,7 +134,7 @@
   <div id="toast" class="toast" role="alert" aria-live="assertive" aria-atomic="true" hidden></div>
 
   <!-- Confirm dialog -->
-  <div id="confirm-dialog" class="dialog-backdrop" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+  <div id="confirm-dialog" class="dialog-backdrop" role="dialog" aria-modal="true" aria-labelledby="dialog-title" hidden>
     <div class="dialog">
       <h3 id="dialog-title" class="dialog-title">Are you sure?</h3>
       <p id="dialog-msg" class="dialog-msg"></p>

@@ -179,11 +179,11 @@ describe("getMonthlySummaryFromHistory", () => {
   const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 5).toISOString();
 
   const history = [
-    { delta: 20, co2Kg: 0.4, category: "food",      timestamp: thisMonth },
-    { delta: 15, co2Kg: 0.3, category: "cab",        timestamp: thisMonth },
+    { delta: 20, co2Kg: 0.4, savingKg: 1.5, category: "food",      timestamp: thisMonth },
+    { delta: 15, co2Kg: 0.3, savingKg: 1.0, category: "cab",        timestamp: thisMonth },
     { delta: -12, co2Kg: 1.8, category: "food",      timestamp: thisMonth },
-    { delta: 25, co2Kg: 0.03, category: "transport", timestamp: thisMonth },
-    { delta: 10, co2Kg: 0.5, category: "food",       timestamp: lastMonth },
+    { delta: 25, co2Kg: 0.03, savingKg: 0.1, category: "transport", timestamp: thisMonth },
+    { delta: 10, co2Kg: 0.5, savingKg: 0.8, category: "food",       timestamp: lastMonth },
   ];
 
   const summary = getMonthlySummaryFromHistory(history);
