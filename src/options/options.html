@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EcoScore Settings</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <a href="#main" class="skip-link">Skip to main content</a>
+
+  <div class="page">
+    <header class="page-header">
+      <span class="logo-leaf" aria-hidden="true">🌿</span>
+      <h1 class="logo-name">EcoScore Settings</h1>
+    </header>
+
+    <main id="main">
+
+      <!-- API Key section -->
+      <section class="card" aria-labelledby="api-heading">
+        <h2 id="api-heading" class="card-title">Gemini API Key</h2>
+        <p class="card-body">
+          EcoScore uses the free Gemini Flash API to generate carbon context. Your key is stored
+          locally — never sent to any server other than Google's.
+        </p>
+        <a
+          href="https://aistudio.google.com/app/apikey"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="link-external"
+          aria-label="Get a free Gemini API key (opens in new tab)"
+        >
+          Get a free key from Google AI Studio ↗
+        </a>
+
+        <div class="form-group" role="group" aria-labelledby="api-key-label">
+          <label id="api-key-label" class="form-label" for="api-key-input">
+            API Key
+          </label>
+          <div class="input-row">
+            <input
+              type="password"
+              id="api-key-input"
+              class="form-input"
+              placeholder="Paste your Gemini API key…"
+              autocomplete="off"
+              spellcheck="false"
+              aria-describedby="api-key-hint api-key-status"
+              maxlength="200"
+            />
+            <button
+              id="toggle-visibility"
+              class="btn-icon"
+              type="button"
+              aria-label="Show API key"
+              title="Toggle visibility"
+            >
+              <span aria-hidden="true" id="eye-icon">👁</span>
+            </button>
+          </div>
+          <p id="api-key-hint" class="form-hint">
+            Free tier includes 1,500 requests/day — more than enough.
+          </p>
+          <p id="api-key-status" class="form-status" aria-live="polite"></p>
+        </div>
+
+        <div class="btn-row">
+          <button id="save-key-btn" class="btn-primary">Save key</button>
+          <button id="test-key-btn" class="btn-secondary">Test connection</button>
+          <button id="clear-key-btn" class="btn-danger">Remove key</button>
+        </div>
+      </section>
+
+      <!-- Supported sites section -->
+      <section class="card" aria-labelledby="sites-heading">
+        <h2 id="sites-heading" class="card-title">Supported platforms</h2>
+        <p class="card-body">EcoScore activates on these sites automatically.</p>
+        <ul class="sites-list" role="list">
+          <li class="site-item">
+            <span class="site-icon" aria-hidden="true">🍽️</span>
+            <div>
+              <strong>Food delivery</strong>
+              <p class="site-detail">Zomato, Swiggy — detects cart items before checkout</p>
+            </div>
+          </li>
+          <li class="site-item">
+            <span class="site-icon" aria-hidden="true">🚕</span>
+            <div>
+              <strong>Cab & mobility</strong>
+              <p class="site-detail">Ola, Uber, Rapido, BluSmart — detects ride type and distance</p>
+            </div>
+          </li>
+          <li class="site-item">
+            <span class="site-icon" aria-hidden="true">📦</span>
+            <div>
+              <strong>E-commerce</strong>
+              <p class="site-detail">Amazon India, Flipkart, Myntra — detects high-impact products</p>
+            </div>
+          </li>
+          <li class="site-item">
+            <span class="site-icon" aria-hidden="true">✈️</span>
+            <div>
+              <strong>Travel</strong>
+              <p class="site-detail">MakeMyTrip, Ixigo, Goibibo — detects domestic flights</p>
+            </div>
+          </li>
+        </ul>
+      </section>
+
+      <!-- Data & Privacy section -->
+      <section class="card" aria-labelledby="privacy-heading">
+        <h2 id="privacy-heading" class="card-title">Data & Privacy</h2>
+        <ul class="privacy-list" role="list">
+          <li>Your API key is stored in <code>chrome.storage.local</code> — only on your device</li>
+          <li>Your score history is synced via <code>chrome.storage.sync</code> — tied to your Chrome profile, not our servers</li>
+          <li>No browsing data, order details, or personal info is ever sent to our servers</li>
+          <li>Carbon analysis prompts sent to Gemini contain only item names and categories — not your identity</li>
+        </ul>
+        <div class="btn-row" style="margin-top: 16px;">
+          <button id="reset-data-btn" class="btn-danger">Reset all data</button>
+        </div>
+      </section>
+
+      <!-- Version -->
+      <footer class="page-footer">
+        <p>EcoScore v1.2.0 · Built for PromptWars · <a href="../../PRIVACY_POLICY.md" target="_blank" style="color: #666; text-decoration: underline;">Privacy Policy</a> · Carbon awareness, not carbon tracking.</p>
+      </footer>
+
+    </main>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast" role="alert" aria-live="assertive" aria-atomic="true" hidden></div>
+
+  <!-- Confirm dialog -->
+  <div id="confirm-dialog" class="dialog-backdrop" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+    <div class="dialog">
+      <h3 id="dialog-title" class="dialog-title">Are you sure?</h3>
+      <p id="dialog-msg" class="dialog-msg"></p>
+      <div class="dialog-btns">
+        <button id="dialog-cancel" class="btn-secondary">Cancel</button>
+        <button id="dialog-confirm" class="btn-danger">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="options.js" type="module"></script>
+</body>
+</html>

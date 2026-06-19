@@ -1,0 +1,104 @@
+{
+  "manifest_version": 3,
+  "name": "EcoScore — Carbon Awareness",
+  "version": "1.2.0",
+  "description": "See the real carbon cost of your daily choices before you confirm. Earn credits. Compete with your city.",
+  "icons": {
+    "16": "assets/icon16.png",
+    "32": "assets/icon32.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  },
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "assets/icon16.png",
+      "48": "assets/icon48.png",
+      "128": "assets/icon128.png"
+    },
+    "default_title": "EcoScore"
+  },
+  "background": {
+    "service_worker": "src/background/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.zomato.com/*", "*://*.swiggy.com/*"],
+      "js": [
+        "src/content-scripts/card-ui.js",
+        "src/content-scripts/content-food.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.olacabs.com/*", "*://*.uber.com/*", "*://*.rapido.bike/*", "*://*.blusmart.com/*"],
+      "js": [
+        "src/content-scripts/card-ui.js",
+        "src/content-scripts/content-cab.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.amazon.in/*", "*://*.flipkart.com/*", "*://*.myntra.com/*"],
+      "js": [
+        "src/content-scripts/card-ui.js",
+        "src/content-scripts/content-ecommerce.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.makemytrip.com/*", "*://*.ixigo.com/*", "*://*.goibibo.com/*", "*://*.yatra.com/*"],
+      "js": [
+        "src/content-scripts/card-ui.js",
+        "src/content-scripts/content-travel.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "src/options/options.html",
+  "permissions": [
+    "storage",
+    "identity",
+    "notifications",
+    "activeTab",
+    "scripting",
+    "alarms"
+  ],
+  "host_permissions": [
+    "*://*.zomato.com/*",
+    "*://*.swiggy.com/*",
+    "*://*.olacabs.com/*",
+    "*://*.uber.com/*",
+    "*://*.rapido.bike/*",
+    "*://*.blusmart.com/*",
+    "*://*.amazon.in/*",
+    "*://*.flipkart.com/*",
+    "*://*.myntra.com/*",
+    "*://*.makemytrip.com/*",
+    "*://*.ixigo.com/*",
+    "*://*.goibibo.com/*",
+    "*://*.yatra.com/*",
+    "*://nominatim.openstreetmap.org/*",
+    "*://generativelanguage.googleapis.com/*",
+    "*://api.duckduckgo.com/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'self' https://generativelanguage.googleapis.com https://nominatim.openstreetmap.org https://api.duckduckgo.com https://*.amazon.in https://*.flipkart.com https://*.myntra.com;"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/beco_dishwash.png",
+        "assets/beco_garbage.png",
+        "assets/jute_mat.png",
+        "assets/milton_bottle.png",
+        "assets/neemans_shoes.png",
+        "assets/no_nasties_shirt.png",
+        "assets/renewed_iphone.png",
+        "assets/renewed_macbook.png"
+      ],
+      "matches": ["*://*.amazon.in/*", "*://*.flipkart.com/*", "*://*.myntra.com/*"]
+    }
+  ]
+}
